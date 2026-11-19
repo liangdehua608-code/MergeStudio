@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 APP_NAME = "视频拼接工坊"
-APP_VERSION = "6.2.0"
+APP_VERSION = "6.3.0"
 APP_ID = "merge-studio"
 DEFAULT_PORT = 8760
 
@@ -27,6 +27,7 @@ RUNTIME_FILE = DATA_DIR / "runtime.json"
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv",
               ".webm", ".ts", ".mpg", ".mpeg"}
+AUDIO_EXTS = {".m4a", ".mp3", ".aac", ".wav", ".flac", ".ogg", ".opus", ".wma"}
 
 FFMPEG = ""
 FFPROBE = ""

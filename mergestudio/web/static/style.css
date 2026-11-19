@@ -499,3 +499,13 @@ td .dur-to{color:var(--muted);font-size:11px;margin-left:5px}
 .enc-dot{width:8px;height:8px;border-radius:50%;background:#c7ccd6;flex:none}
 .enc-dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(14,159,110,.12)}
 .enc-dot.bad{background:var(--bad);box-shadow:0 0 0 3px rgba(220,63,63,.1)}
+
+/* ================= v6.3：输入框+按钮 / 单选胶囊 ================= */
+.input-btn{display:flex;gap:6px;align-items:center}
+.input-btn .input{flex:1;min-width:0}
+.input-btn .btn{flex:none;white-space:nowrap}
+.choice{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
+  border:1px solid var(--line);border-radius:999px;background:#fff;
+  font-size:12px;cursor:pointer;user-select:none}
+.choice input{accent-color:var(--brand);margin:0}
+.choice:has(input:checked){border-color:var(--brand);background:#eef0ff;color:var(--brand);font-weight:600}

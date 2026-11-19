@@ -20,8 +20,9 @@ def audio_run(params: dict):
     JOB.reset()
     try:
         folder = str(params.get("folder", "")).strip()
-        if not folder:
-            raise ValueError("请先选择源文件夹")
+        single = str(params.get("target", "")).strip()
+        if not folder and not single:
+            raise ValueError("请先选择视频文件夹或单个视频")
         if not C.FFMPEG:
             raise RuntimeError("尚未设置 ffmpeg 路径")
 
@@ -36,10 +37,17 @@ def audio_run(params: dict):
         if out_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
 
-        JOB.update(state="scanning", message="正在扫描视频文件…")
-        _, files = list_video_files(folder, recursive)
-        if not files:
-            raise RuntimeError("文件夹里没有可用的视频文件")
+        JOB.update(state="scanning", message="正在准备文件…")
+        if single:
+            f = Path(single).expanduser()
+            if not f.is_file():
+                raise RuntimeError(f"文件不存在：{f}")
+            files = [f]
+            JOB.log("🎧 单文件模式")
+        else:
+            _, files = list_video_files(folder, recursive)
+            if not files:
+                raise RuntimeError("文件夹里没有可用的视频文件")
         JOB.update(total_files=len(files), done_files=0)
         JOB.log(f"🎧 目标格式：{fmt.upper()} · 共 {len(files)} 个文件")
         if out_dir:
@@ -104,7 +112,7 @@ def audio_run(params: dict):
 
         JOB.update(state="done", progress=1.0,
                    message=f"提取完成 · {ok}/{total} 个",
-                   output=first_out or str(out_dir or folder),
+                   output=first_out or str(out_dir or (files[0].parent if files else folder)),
                    final_size=out_size,
                    final_duration=total_dur,
                    encoded_count=ok, copied_count=0,

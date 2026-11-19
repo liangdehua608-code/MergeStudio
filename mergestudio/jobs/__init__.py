@@ -10,6 +10,9 @@ def run_task(params: dict):
     if op == "audio":
         from .audio import audio_run
         return audio_run(params)
+    if op == "mux":
+        from .mux import mux_run
+        return mux_run(params)
     if op == "video":
         from .video import video_run
         return video_run(params)

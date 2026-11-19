@@ -17,6 +17,7 @@ const S = {
   audio: { scan: null },
   split: { plan: null },
   single: { path: "", width: 0, height: 0, duration: 0 },
+  mux: { video: "", audio: "", vdur: 0, adur: 0 },
   encoders: {},
   detailId: "",
   view: "queue",
@@ -127,6 +128,7 @@ const PAGES = {
   audio: { title: "提取音频", sub: "批量导出音轨 · m4a 直拷 / mp3 转码" },
   split: { title: "视频切割", sub: "按章节或固定时长切开 · 勾选要导出的片段" },
   single: { title: "单个视频", sub: "只处理一个视频 · 去水印 / 去黑边 / 剪片头片尾" },
+  mux: { title: "音视频合并", sub: "把音频配到视频上 · 替换原音轨或混合" },
   settings: { title: "设置", sub: "ffmpeg 引擎与默认参数" },
 };
 
@@ -145,6 +147,7 @@ function setRoute() {
   if (name === "audio") renderAudio();
   if (name === "split") renderSplit();
   if (name === "single") renderSingle();
+  if (name === "mux") renderMux();
   if (name === "settings") loadConfig();
 }
 
@@ -157,7 +160,7 @@ function renderTopActions() {
       : running ? '<span class="pill brand">运行中 ' + running + "</span>"
       : '<span class="pill queued">队列空闲</span>';
     box.innerHTML = '<span class="pill queued">排队 ' + (c.queued || 0) + "</span>" + status;
-  } else if (S.view === "new" || S.view === "audio" || S.view === "split" || S.view === "single") {
+  } else if (["new", "audio", "split", "single", "mux"].includes(S.view)) {
     box.innerHTML = '<a class="btn sm" href="#/queue">← 返回队列</a>';
   } else {
     box.innerHTML = "";
@@ -276,6 +279,10 @@ function renderActive() {
     ? ["单个视频",
        (opts.crop && opts.crop.enabled) ? "画面裁剪" : "无裁剪",
        "输出为新文件"]
+    : opts.op === "mux"
+    ? ["视频 + 音轨", opts.mode === "mix" ? "与原声混合" : "替换原音轨",
+       opts.fit === "video" ? "按视频时长" : "按较短者"]
+
     : [(t.total_files || 0) + " 个文件",
        MODE_TEXT[opts.mode] || opts.mode,
        trim > 0 ? "裁剪 " + trim + "s/集" : "不裁剪",
@@ -376,7 +383,7 @@ function renderTaskList() {
       '<div style="min-width:0">' +
         '<div class="task-name"><span class="nm" title="' + esc(t.name) + '">' + esc(t.name) + "</span>" +
           '<span class="op-tag ' + (opts.op === "audio" ? "audio" : "") + '">' +
-            ({ merge: "合并", audio: "音频", split: "切割", video: "单视频" }[opts.op] || "合并") + "</span>" +
+            ({ merge: "合并", audio: "音频", split: "切割", video: "单视频", mux: "音视频" }[opts.op] || "合并") + "</span>" +
           '<span class="pill ' + st.cls + '">' + st.text + "</span>" +
           (t.state === "running" || t.state === "scanning" || t.state === "copying" || t.state === "encoding"
             ? '<span class="pill brand num">' + pct + "%</span>" : "") +
@@ -545,7 +552,7 @@ function renderScanTable() {
         '<i class="dot ' + dotColor + '"' + dotStyle + '></i> ' + esc(f.name) + "</td>" +
       '<td class="mono">' + (f.ok ? f.width + "×" + f.height : "—") + "</td>" +
       '<td class="mono">' + (f.ok ? String(f.vcodec || "").toUpperCase() : "—") + "</td>" +
-      "<td>" + fmtSize(f.size) + "</td>" +
+      "<td>" + (f.size ? fmtSize(f.size) : "—") + "</td>" +
       "<td>" + durCell + "</td>" +
       "<td>" + pill + "</td>" +
     "</tr>";
@@ -773,6 +780,10 @@ async function loadDetail(id) {
   } else if (opts.op === "split") {
     bits.push(chip(opts.precise ? "精确切割（重编码）" : "流复制（关键帧对齐）"));
     bits.push(chip((t.total_files || 0) + " 段"));
+  } else if (opts.op === "mux") {
+    bits.push(chip(opts.mode === "mix" ? "与原声混合" : "替换原音轨"));
+    if (opts.mode === "mix") bits.push(chip("新音频音量 " + (opts.volume ?? 100) + "%"));
+    bits.push(chip(opts.fit === "video" ? "按视频时长" : "按较短者为准"));
   } else if (opts.op === "video") {
     if (opts.crop && opts.crop.enabled) {
       const cp = opts.crop;
@@ -1023,6 +1034,58 @@ function bindEvents() {
     finally { te.disabled = false; te.textContent = "重新检测"; }
   };
 
+  // 输出目录：点击选择而不是手填
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-pick-dir]");
+    if (!b) return;
+    e.preventDefault();
+    const input = $(b.dataset.pickDir);
+    if (!input) return;
+    const old = b.textContent;
+    b.disabled = true; b.textContent = "…";
+    try {
+      const r = await api("/api/pick-folder", { title: "选择输出目录" });
+      if (r.path) {
+        input.value = r.path;
+        input.dispatchEvent(new Event("input"));
+        input.dispatchEvent(new Event("change"));
+      }
+    } catch (err) { toast("打开失败：" + err.message, "bad"); }
+    finally { b.disabled = false; b.textContent = old; }
+  });
+
+  // 音频：单个 / 批量
+  $("#a-single").addEventListener("change", () => {
+    const single = $("#a-single").checked;
+    $("#a-recursive").disabled = single;
+    $("#a-folder").placeholder = single
+      ? "选择一个视频文件"
+      : "选择课程文件夹，例如 E://videos//课程01";
+    S.audio.scan = null;
+    renderAudio();
+  });
+  $("#a-pick").onclick = async () => {
+    const btn = $("#a-pick");
+    const single = $("#a-single").checked;
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const r = await api(single ? "/api/pick-video" : "/api/pick-folder",
+                          { title: single ? "选择视频文件" : "选择视频文件夹" });
+      if (r.path) {
+        $("#a-folder").value = r.path;
+        S.audio.scan = null;
+        renderAudio();
+      }
+    } catch (e) { toast("打开失败：" + e.message, "bad"); }
+    finally { btn.disabled = false; btn.textContent = "浏览"; }
+  };
+
+  // 音视频合并
+  $("#m-fit").addEventListener("change", renderMux);
+  $("#m-pick-video").onclick = () => pickMux("video");
+  $("#m-pick-audio").onclick = () => pickMux("audio");
+  $("#m-start").onclick = startMux;
+
   // 视频切割
   $("#p-plan").onclick = makeSplitPlan;
   $("#p-pick").onclick = async () => {
@@ -1065,15 +1128,6 @@ function bindEvents() {
   // 提取音频
   $("#a-scan").onclick = scanAudio;
   $("#a-enqueue").onclick = enqueueAudio;
-  $("#a-pick").onclick = async () => {
-    const btn = $("#a-pick");
-    btn.disabled = true; btn.textContent = "…";
-    try {
-      const r = await api("/api/pick-folder", { title: "选择视频文件夹" });
-      if (r.path) { $("#a-folder").value = r.path; S.audio.scan = null; renderAudio(); }
-    } catch (e) { toast("打开失败：" + e.message, "bad"); }
-    finally { btn.disabled = false; btn.textContent = "浏览"; }
-  };
   $("#a-format").addEventListener("change", () => {
     $("#a-quality").disabled = $("#a-format").value !== "mp3";
   });
@@ -1376,6 +1430,7 @@ async function probeSingle() {
       (r.acodec ? String(r.acodec).toUpperCase() : "无") + "</b>" +
       (r.chapters ? " · 章节 " + r.chapters + " 个" : "");
     renderSingle();
+  renderMux();
     toast("已读取视频信息", "ok");
   } catch (e) {
     S.single = { path: "", width: 0, height: 0 };
@@ -1456,6 +1511,71 @@ function applyEncoderAvailability(sel) {
   }
 }
 
+
+/* ================================================================
+ * v6.3：音视频合并
+ * ================================================================ */
+function renderMux() {
+  const m = S.mux || {};
+  const box = $("#m-meta");
+  if (!box) return;
+  box.innerHTML = (m.vdur || m.adur)
+    ? "视频 <b>" + (m.vdur ? fmtDur(m.vdur) : "—") + "</b> · 音频 <b>" +
+      (m.adur ? fmtDur(m.adur) : "—") + "</b> · 按当前设置输出约 <b>" +
+      fmtDur($("#m-fit").value === "video" ? (m.vdur || 0)
+            : Math.min(m.vdur || 1e9, m.adur || 1e9)) + "</b>"
+    : "选好后会显示两边的时长";
+}
+
+async function pickMux(kind) {
+  const isVideo = kind === "video";
+  const btn = isVideo ? $("#m-pick-video") : $("#m-pick-audio");
+  const input = isVideo ? $("#m-video") : $("#m-audio");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const r = await api(isVideo ? "/api/pick-video" : "/api/pick-audio",
+                        { title: isVideo ? "选择视频文件" : "选择音频文件" });
+    if (!r.path) return;
+    input.value = r.path;
+    try {
+      const p = await api("/api/probe?path=" + encodeURIComponent(r.path));
+      if (isVideo) { S.mux.video = r.path; S.mux.vdur = p.duration || 0; }
+      else { S.mux.audio = r.path; S.mux.adur = p.duration || 0; }
+    } catch (e) { /* 探测失败不影响选择 */ }
+    renderMux();
+  } catch (e) {
+    toast("打开失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
+async function startMux() {
+  const video = $("#m-video").value.trim();
+  const audio = $("#m-audio").value.trim();
+  if (!video || !audio) return toast("请同时选择视频和音频文件", "bad");
+  const mode = (document.querySelector('input[name="m-mode"]:checked') || {}).value || "replace";
+  const btn = $("#m-start");
+  btn.disabled = true; btn.textContent = "加入中…";
+  try {
+    await api("/api/queue/add", {
+      op: "mux", video, audio,
+      output: $("#m-output").value.trim(),
+      mode,
+      volume: parseInt($("#m-volume").value, 10) || 100,
+      fit: $("#m-fit").value,
+    });
+    toast("音视频合并任务已加入队列", "ok");
+    await refreshQueue();
+    location.hash = "#/queue";
+  } catch (e) {
+    toast("加入失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = "加入队列";
+  }
+}
+
 /* ---------------- 启动 ---------------- *//* ================================================================
  * v6：提取音频
  * ================================================================ */
@@ -1475,8 +1595,8 @@ function renderAudio() {
 
   const withAudio = files.filter(f => f.ok && f.acodec);
   const dur = files.reduce((a, f) => a + (Number(f.duration) || 0), 0);
-  $("#a-desc").textContent = files.length + " 个视频 · 有音轨 " + withAudio.length +
-    " 个 · 总时长 " + fmtDur(dur);
+  $("#a-desc").textContent = (sc.single ? "单个视频 · " : files.length + " 个视频 · ") +
+    "有音轨 " + withAudio.length + " 个 · 总时长 " + fmtDur(dur);
   btn.disabled = !files.length || !(S.cfg && S.cfg.ready) || !withAudio.length;
   $("#a-list").className = "";
   $("#a-list").innerHTML =
@@ -1495,15 +1615,26 @@ function renderAudio() {
 }
 
 async function scanAudio() {
-  const folder = $("#a-folder").value.trim();
-  if (!folder) return toast("请先选择文件夹", "bad");
+  const path = $("#a-folder").value.trim();
+  if (!path) return toast("请先选择视频文件或文件夹", "bad");
   if (!(S.cfg && S.cfg.ready)) return toast("ffmpeg 未就绪，请先到设置页配置", "bad");
   const btn = $("#a-scan");
+  const single = $("#a-single").checked;
   btn.disabled = true; btn.textContent = "扫描中…";
   try {
-    S.audio.scan = await api("/api/scan", {
-      folder, recursive: $("#a-recursive").checked,
-    });
+    if (single) {
+      const r = await api("/api/probe?path=" + encodeURIComponent(path));
+      const name = path.split(/[\\/]/).pop();
+      S.audio.scan = { single: true, files: [{
+        name, path: r.path, duration: r.duration, size: 0,
+        ok: true, acodec: r.acodec,
+      }] };
+    } else {
+      S.audio.scan = await api("/api/scan", {
+        folder: path, recursive: $("#a-recursive").checked,
+      });
+      S.audio.scan.single = false;
+    }
     renderAudio();
     toast("扫描完成：" + S.audio.scan.files.length + " 个文件", "ok");
   } catch (e) {
@@ -1514,19 +1645,21 @@ async function scanAudio() {
 }
 
 async function enqueueAudio() {
-  const folder = $("#a-folder").value.trim();
-  if (!folder) return toast("请先选择文件夹", "bad");
+  const path = $("#a-folder").value.trim();
+  if (!path) return toast("请先选择视频文件或文件夹", "bad");
+  const single = $("#a-single").checked;
   const btn = $("#a-enqueue");
   btn.disabled = true; btn.textContent = "加入中…";
   try {
-    await api("/api/queue/add", {
+    const payload = {
       op: "audio",
-      folder,
-      recursive: $("#a-recursive").checked,
       output: $("#a-output").value.trim(),
       audio_format: $("#a-format").value,
       audio_quality: parseInt($("#a-quality").value, 10) || 2,
-    });
+      recursive: single ? false : $("#a-recursive").checked,
+    };
+    if (single) payload.target = path; else payload.folder = path;
+    await api("/api/queue/add", payload);
     toast("音频任务已加入队列", "ok");
     await refreshQueue();
     location.hash = "#/queue";

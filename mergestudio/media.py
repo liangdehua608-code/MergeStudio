@@ -530,11 +530,26 @@ def scan_folder(folder: str, recursive: bool, exclude_path=None) -> dict:
     }
 
 def reveal_path(p: Path):
+    """在资源管理器里定位文件（或打开目录）。
+
+    Windows 上必须用 `explorer /select,"路径"` 这种「整串命令」形式：
+    传参数列表时 Python 会把 `/select,C:/a b/c.mp4` 整体加引号，
+    资源管理器解析失败就会退回到默认目录——表现就是「点了没反应」。
+    """
     if os.name == "nt":
-        if p.is_file():
-            subprocess.Popen(["explorer", f"/select,{p}"])
-        else:
-            os.startfile(str(p))
+        target = str(p)
+        try:
+            if p.is_file():
+                subprocess.Popen(f'explorer /select,"{target}"')
+            else:
+                subprocess.Popen(f'explorer "{target}"')
+            return
+        except Exception:
+            try:
+                os.startfile(str(p.parent if p.is_file() else p))
+                return
+            except Exception:
+                pass
     elif sys.platform == "darwin":
         subprocess.Popen(["open", "-R", str(p)])
     else:
@@ -729,3 +744,31 @@ def extract_frame(path: Path, t: float = 2.0, width: int = 720) -> bytes:
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError("抽帧失败")
     return r.stdout
+
+
+def probe_media(path: Path) -> dict:
+    """通用探测：音频文件没有视频轨时也能拿到 acodec / duration。"""
+    try:
+        r = subprocess.run(
+            [C.FFPROBE, "-v", "error", "-print_format", "json",
+             "-show_streams", "-show_format", str(path)],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace")
+        data = json.loads(r.stdout or "{}")
+    except Exception:
+        return {}
+    streams = data.get("streams") or []
+    fmt = data.get("format") or {}
+    v = next((x for x in streams if x.get("codec_type") == "video"), None)
+    a = next((x for x in streams if x.get("codec_type") == "audio"), None)
+    try:
+        dur = float(fmt.get("duration") or (a or {}).get("duration")
+                    or (v or {}).get("duration") or 0)
+    except Exception:
+        dur = 0.0
+    return {"vcodec": (v or {}).get("codec_name"),
+            "acodec": (a or {}).get("codec_name"),
+            "duration": dur,
+            "width": (v or {}).get("width"),
+            "height": (v or {}).get("height"),
+            "sample_rate": (a or {}).get("sample_rate")}

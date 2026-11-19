@@ -42,6 +42,10 @@
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12"/></svg>
         <span class="lbl">视频切割</span>
       </a>
+      <a class="nav-item" href="#/mux" data-nav="mux">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10v12H4z"/><path d="M17 9v6M20 7v10"/></svg>
+        <span class="lbl">音视频合并</span>
+      </a>
       <a class="nav-item" href="#/settings" data-nav="settings">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
         <span class="lbl">设置</span>
@@ -359,7 +363,10 @@
               <input id="v-trim-tail" class="input" type="number" min="0" step="0.5" value="0">
             </label>
             <label class="field">输出目录（可选）
-              <input id="v-output" class="input" placeholder="留空 = 源文件同目录">
+              <div class="input-btn">
+                <input id="v-output" class="input" placeholder="留空 = 源文件同目录">
+                <button class="btn sm" data-pick-dir="#v-output">选择</button>
+              </div>
             </label>
           </div>
 
@@ -413,6 +420,7 @@
             <button class="btn" id="a-scan">扫描</button>
           </div>
           <div class="opt-row">
+            <label class="switch"><input type="checkbox" id="a-single"><span class="track"></span>只处理单个视频</label>
             <label class="switch"><input type="checkbox" id="a-recursive"><span class="track"></span>包含子文件夹</label>
           </div>
           <div class="grid3" style="margin-top:16px">
@@ -431,7 +439,10 @@
               </select>
             </label>
             <label class="field">输出目录（可选）
-              <input id="a-output" class="input" placeholder="留空 = 输出到每个视频同目录">
+              <div class="input-btn">
+                <input id="a-output" class="input" placeholder="留空 = 输出到每个视频同目录">
+                <button class="btn sm" data-pick-dir="#a-output">选择</button>
+              </div>
             </label>
           </div>
           <div class="hint" style="margin-top:10px">输出文件名与视频同名，扩展名换成 m4a / mp3，不会覆盖源视频。</div>
@@ -475,7 +486,10 @@
               <input id="p-minutes" class="input" type="number" min="1" step="1" value="30" disabled>
             </label>
             <label class="field">输出目录（可选）
-              <input id="p-output" class="input" placeholder="留空 = 与源文件同目录">
+              <div class="input-btn">
+                <input id="p-output" class="input" placeholder="留空 = 与源文件同目录">
+                <button class="btn sm" data-pick-dir="#p-output">选择</button>
+              </div>
             </label>
           </div>
           <div class="opt-row">
@@ -506,6 +520,58 @@
               </tr></thead>
               <tbody id="plan-body"></tbody>
             </table>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="view" data-view="mux">
+        <div class="panel">
+          <div class="panel-head">
+            <div><h2 class="panel-title">音视频合并</h2>
+              <p class="panel-desc">把一段音频配到视频上：替换原音轨，或与原声混合后输出新文件</p></div>
+          </div>
+          <div class="path-row">
+            <div class="input-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5v5l4-2.5z"/></svg>
+              <input id="m-video" class="input" placeholder="视频文件（例如课程视频）">
+            </div>
+            <button class="btn" id="m-pick-video">浏览</button>
+          </div>
+          <div class="path-row" style="margin-top:10px">
+            <div class="input-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v10"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="14" r="2.5"/></svg>
+              <input id="m-audio" class="input" placeholder="音频文件（m4a / mp3 / wav / aac）">
+            </div>
+            <button class="btn" id="m-pick-audio">浏览</button>
+          </div>
+          <div class="opt-row" id="m-meta" style="color:var(--muted);font-size:12px">选好后会显示两边的时长</div>
+
+          <div class="chips" style="margin-top:14px">
+            <label class="choice"><input type="radio" name="m-mode" value="replace" checked><span>替换原音轨</span></label>
+            <label class="choice"><input type="radio" name="m-mode" value="mix"><span>与原声混合</span></label>
+          </div>
+
+          <div class="grid3" style="margin-top:14px">
+            <label class="field">新音频音量（%，混合时生效）
+              <input id="m-volume" class="input" type="number" min="0" max="200" step="5" value="100">
+            </label>
+            <label class="field">时长对齐
+              <select id="m-fit" class="input">
+                <option value="shortest">以较短者为准</option>
+                <option value="video">以视频时长为准（音频不足补静音）</option>
+              </select>
+            </label>
+            <label class="field">输出目录（可选）
+              <div class="input-btn">
+                <input id="m-output" class="input" placeholder="留空 = 视频同目录，文件名 _muxed.mp4">
+                <button class="btn sm" data-pick-dir="#m-output">选择</button>
+              </div>
+            </label>
+          </div>
+
+          <div class="actions" style="margin-top:14px">
+            <button class="btn primary" id="m-start">加入队列</button>
           </div>
         </div>
       </section>
@@ -583,7 +649,7 @@
               <span class="chip">优先级排序</span><span class="chip">批量建任务</span>
               <span class="chip">合并前预检</span><span class="chip">片头片尾裁剪</span>
               <span class="chip">单视频裁剪 / 去水印</span><span class="chip">画面裁剪 / 去台标</span><span class="chip">章节标记</span>
-              <span class="chip">合并后自检</span><span class="chip">提取音频</span>
+              <span class="chip">合并后自检</span><span class="chip">提取音频</span><span class="chip">音视频合并</span>
               <span class="chip">编码器自动检测</span><span class="chip">硬件编码</span><span class="chip">本地运行</span>
             </div>
             <p class="panel-desc" style="margin-top:14px;line-height:1.8">
@@ -591,7 +657,7 @@
               不会因为多任务抢占磁盘导致所有任务一起变慢。批处理多门课程时，
               把任务排好队然后去睡觉就行。
             </p>
-            <div class="kv" style="margin-top:14px"><span class="k">版本</span><span class="v">6.2</span></div>
+            <div class="kv" style="margin-top:14px"><span class="k">版本</span><span class="v">6.3</span></div>
             <div class="kv"><span class="k">接口</span><span class="v mono">/api/queue · /api/task</span></div>
           </div>
         </div>

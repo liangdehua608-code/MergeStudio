@@ -16,10 +16,12 @@ from mergestudio import encoders
 from mergestudio.jobs import merge as merge_mod
 from mergestudio.jobs.audio import audio_run
 from mergestudio.jobs.merge import job_run
+from mergestudio.jobs.mux import mux_run
 from mergestudio.jobs.split import split_run
 from mergestudio.jobs.video import video_run
 from mergestudio.task import Task, _TLS
-from mergestudio.media import detect_crop, extract_frame, probe_chapters, probe_full
+from mergestudio.media import (detect_crop, extract_frame, probe_chapters,
+                               probe_full, probe_media, reveal_path)
 
 READY = False
 
@@ -292,4 +294,68 @@ class VideoJobTest(unittest.TestCase):
         self.assertEqual(info.get("width"), 640)
         self.assertEqual(info.get("height"), 300, "应裁掉顶部 60px")
         self.assertTrue(info.get("acodec"), "应保留音轨")
+
+class AudioSingleAndMuxTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        C.apply_config(C.load_config())
+        if not C.config_status().get("ready"):
+            raise unittest.SkipTest("未配置 ffmpeg / ffprobe，跳过")
+        cls.tmp = tempfile.TemporaryDirectory(prefix="mergestudio-mux-")
+        cls.video = Path(cls.tmp.name) / "clip.mp4"
+        _make_clip(cls.video, seconds=2)
+        cls.audio = Path(cls.tmp.name) / "bgm.mp3"
+        subprocess.run([C.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "sine=frequency=880:duration=4",
+                        "-c:a", "libmp3lame", "-q:a", "4", str(cls.audio)],
+                       check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_audio_from_single_file(self):
+        task = Task("TAUDIO1", "audio", {})
+        _TLS.task = task
+        try:
+            audio_run({"op": "audio", "target": str(self.video),
+                       "audio_format": "m4a"})
+        finally:
+            _TLS.task = None
+        self.assertEqual(task.state, "done", task.message)
+        out = self.video.with_suffix(".m4a")
+        self.assertTrue(out.exists(), "单文件未生成 m4a")
+        self.assertGreater(out.stat().st_size, 0)
+
+    def test_mux_replace(self):
+        task = Task("TMUX", "mux", {})
+        _TLS.task = task
+        try:
+            mux_run({"op": "mux", "video": str(self.video),
+                     "audio": str(self.audio),
+                     "output": str(Path(self.tmp.name) / "muxed"),
+                     "mode": "replace", "fit": "shortest"})
+        finally:
+            _TLS.task = None
+        self.assertEqual(task.state, "done", task.message)
+        info = probe_media(Path(task.output))
+        self.assertTrue(info.get("vcodec"))
+        self.assertTrue(info.get("acodec"), "合并后应有音轨")
+        self.assertAlmostEqual(info.get("duration", 0), 2.0, delta=0.4)
+
+    def test_reveal_command_uses_select_quotes(self):
+        calls = []
+        orig = merge_mod.__dict__.get("subprocess")
+        class Fake:
+            def __init__(self, cmd, *a, **kw):
+                calls.append(cmd)
+        import mergestudio.media as media_mod
+        old_popen = media_mod.subprocess.Popen
+        media_mod.subprocess.Popen = Fake
+        try:
+            reveal_path(self.video)
+        finally:
+            media_mod.subprocess.Popen = old_popen
+        self.assertTrue(calls and calls[0].startswith('explorer /select,"'),
+                        f"定位命令不对：{calls}")
 

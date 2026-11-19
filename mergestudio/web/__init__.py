@@ -91,8 +91,8 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             raw = (qs.get("path") or [""])[0]
             f = Path(raw)
-            if not raw or not f.is_file() or f.suffix.lower() not in C.VIDEO_EXTS:
-                self._json({"error": "不是有效的视频文件"}, 400)
+            if not raw or not f.is_file() or f.suffix.lower() not in (C.VIDEO_EXTS | C.AUDIO_EXTS):
+                self._json({"error": "不是有效的音视频文件"}, 400)
                 return
             info = probe_full(f) or {}
             self._json({"ok": True, "path": str(f),
@@ -153,7 +153,8 @@ class Handler(BaseHTTPRequestHandler):
                 "parallel", "crf", "preset", "size", "fps", "trim_head",
                 "trim_tail", "chapters", "file_order", "crop",
                 "audio_format", "audio_quality", "on_error",
-                "target", "segments", "precise")
+                "target", "segments", "precise",
+                "video", "audio", "volume", "fit")
         return {k: body[k] for k in keys if k in body}
 
     # ---------- POST ----------
@@ -196,6 +197,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/pick-video":
                 pats = ["*.mp4", "*.mkv", "*.mov", "*.avi", "*.m4v", "*.ts"]
                 r = pick_file_dialog(str(body.get("title") or "选择视频文件"), pats)
+                if r["ok"]:
+                    self._json({"path": r["path"]})
+                else:
+                    self._json({"error": r["error"]}, 500)
+
+            elif path == "/api/pick-audio":
+                pats = ["*.m4a", "*.mp3", "*.aac", "*.wav", "*.flac", "*.ogg", "*.opus"]
+                r = pick_file_dialog(str(body.get("title") or "选择音频文件"), pats)
                 if r["ok"]:
                     self._json({"path": r["path"]})
                 else:
@@ -301,10 +310,25 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 params = self._clean_params(body)
                 op = str(params.get("op") or "merge").lower()
-                if op in ("split", "video"):
+                if op == "mux":
+                    v = str(params.get("video") or "").strip()
+                    a = str(params.get("audio") or "").strip()
+                    if not v or not a:
+                        self._json({"error": "请同时选择视频和音频文件"}, 400)
+                        return
+                    for label, pth in (("视频", v), ("音频", a)):
+                        if not Path(pth).expanduser().is_file():
+                            self._json({"error": f"{label}文件不存在：{pth}"}, 400)
+                            return
+                elif op == "audio" and str(params.get("target") or "").strip():
+                    target = str(params["target"]).strip()
+                    if not Path(target).expanduser().is_file():
+                        self._json({"error": f"文件不存在：{target}"}, 400)
+                        return
+                elif op in ("split", "video"):
                     target = str(params.get("target") or "").strip()
                     if not target:
-                        self._json({"error": "请选择要切割的视频文件"}, 400)
+                        self._json({"error": "请选择要处理的视频文件"}, 400)
                         return
                     if not Path(target).expanduser().is_file():
                         self._json({"error": f"文件不存在：{target}"}, 400)
