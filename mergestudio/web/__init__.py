@@ -10,9 +10,10 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .. import config as C
-from ..config import pick_exe_dialog, pick_folder_dialog
+from ..config import pick_exe_dialog, pick_file_dialog, pick_folder_dialog
 from ..media import (compute_output_path, detect_crop, extract_frame,
-                     list_video_files, reveal_path, scan_folder)
+                     list_video_files, probe_chapters, probe_full,
+                     reveal_path, scan_folder)
 from ..queue import QUEUE
 
 _SHUTDOWN = {"fn": None}
@@ -134,7 +135,8 @@ class Handler(BaseHTTPRequestHandler):
         keys = ("op", "folder", "recursive", "output", "mode", "encoder",
                 "parallel", "crf", "preset", "size", "fps", "trim_head",
                 "trim_tail", "chapters", "file_order", "crop",
-                "audio_format", "audio_quality")
+                "audio_format", "audio_quality", "on_error",
+                "target", "segments", "precise")
         return {k: body[k] for k in keys if k in body}
 
     # ---------- POST ----------
@@ -170,6 +172,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json({"path": r["path"]})
 
+            elif path == "/api/pick-video":
+                pats = ["*.mp4", "*.mkv", "*.mov", "*.avi", "*.m4v", "*.ts"]
+                r = pick_file_dialog(str(body.get("title") or "选择视频文件"), pats)
+                if r["ok"]:
+                    self._json({"path": r["path"]})
+                else:
+                    self._json({"error": r["error"]}, 500)
+
             elif path == "/api/pick-folder":
                 r = pick_folder_dialog(str(body.get("title") or "选择文件夹"))
                 if r["ok"]:
@@ -192,6 +202,56 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     target = None
                 self._json(scan_folder(folder, recursive, exclude_path=target))
+
+            elif path == "/api/split/plan":
+                raw = str(body.get("path") or "").strip()
+                mode = str(body.get("mode") or "chapters").lower()
+                if not raw:
+                    self._json({"error": "请先选择视频文件"}, 400)
+                    return
+                f = Path(raw)
+                if not f.is_file():
+                    self._json({"error": "文件不存在"}, 400)
+                    return
+                info = probe_full(f) or {}
+                dur = float(info.get("duration") or 0)
+                if dur <= 0:
+                    self._json({"error": "无法读取视频时长"}, 400)
+                    return
+                segs = []
+                if mode == "chapters":
+                    chs = probe_chapters(f)
+                    if not chs:
+                        self._json({"ok": False,
+                                    "error": "这个视频没有章节标记，可以改用「按固定时长」"},
+                                    200)
+                        return
+                    for i, ch in enumerate(chs):
+                        segs.append({"index": i,
+                                     "title": ch["title"] or f"第 {i + 1} 段",
+                                     "start": round(ch["start"], 3),
+                                     "end": round(ch["end"], 3),
+                                     "duration": round(ch["end"] - ch["start"], 3)})
+                else:
+                    try:
+                        minutes = float(body.get("minutes") or 30)
+                    except Exception:
+                        minutes = 30
+                    if minutes <= 0:
+                        self._json({"error": "分段时长必须大于 0"}, 400)
+                        return
+                    step = minutes * 60
+                    n = max(1, int((dur + step - 0.01) // step))
+                    for i in range(n):
+                        s = i * step
+                        e = min(dur, s + step)
+                        segs.append({"index": i,
+                                     "title": f"第 {i + 1} 段",
+                                     "start": round(s, 3), "end": round(e, 3),
+                                     "duration": round(e - s, 3)})
+                self._json({"ok": True, "path": str(f), "duration": dur,
+                            "mode": mode, "width": info.get("width"),
+                            "height": info.get("height"), "segments": segs})
 
             elif path == "/api/detect-crop":
                 if not C.FFMPEG or not C.FFPROBE:
@@ -219,13 +279,26 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "尚未设置 ffmpeg/ffprobe 路径"}, 400)
                     return
                 params = self._clean_params(body)
-                folder = str(params.get("folder", "")).strip()
-                if not folder:
-                    self._json({"error": "请填写源文件夹路径"}, 400)
-                    return
-                if not Path(folder).expanduser().is_dir():
-                    self._json({"error": f"文件夹不存在：{folder}"}, 400)
-                    return
+                op = str(params.get("op") or "merge").lower()
+                if op == "split":
+                    target = str(params.get("target") or "").strip()
+                    if not target:
+                        self._json({"error": "请选择要切割的视频文件"}, 400)
+                        return
+                    if not Path(target).expanduser().is_file():
+                        self._json({"error": f"文件不存在：{target}"}, 400)
+                        return
+                    if not params.get("segments"):
+                        self._json({"error": "请先勾选要导出的片段"}, 400)
+                        return
+                else:
+                    folder = str(params.get("folder", "")).strip()
+                    if not folder:
+                        self._json({"error": "请填写源文件夹路径"}, 400)
+                        return
+                    if not Path(folder).expanduser().is_dir():
+                        self._json({"error": f"文件夹不存在：{folder}"}, 400)
+                        return
                 task = QUEUE.add(params, str(body.get("name") or "").strip())
                 self._json({"ok": True, "task": task})
 
@@ -246,7 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": QUEUE.cancel(str(body.get("id", "")))})
 
             elif path == "/api/queue/retry":
-                self._json({"ok": QUEUE.retry(str(body.get("id", "")))})
+                self._json({"ok": QUEUE.retry(str(body.get("id", "")),
+                                              bool(body.get("resume")))})
 
             elif path == "/api/queue/remove":
                 self._json({"ok": QUEUE.remove(str(body.get("id", "")))})

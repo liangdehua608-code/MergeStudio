@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 RUNNING_STATES = ("running", "scanning", "copying", "encoding")
 
@@ -26,7 +27,11 @@ class Task:
         self.id = tid
         self.name = name or "未命名任务"
         self.params = dict(params or {})
-        self.folder = str(self.params.get("folder", ""))
+        folder = str(self.params.get("folder", "")).strip()
+        if not folder:
+            target = str(self.params.get("target", "")).strip()
+            folder = str(Path(target).parent) if target else ""
+        self.folder = folder
         self.created_at = time.time()
         self.started_at = 0.0
         self.finished_at = 0.0
@@ -53,6 +58,9 @@ class Task:
         self.duration_delta = 0.0
         self.report = {}
         self.error = ""
+        self.work_dir = ""
+        self.resume_count = 0
+        self.resumable = False
 
     # --- 与 v4 JOB 相同的接口 ---
     def reset(self):
@@ -104,6 +112,9 @@ class Task:
                 "duration_delta": self.duration_delta,
                 "report": self.report,
                 "error": self.error,
+                "work_dir": self.work_dir,
+                "resume_count": self.resume_count,
+                "resumable": self.resumable,
                 "created_at": self.created_at,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
@@ -123,6 +134,7 @@ class Task:
                     "trim_head": p.get("trim_head", 0),
                     "trim_tail": p.get("trim_tail", 0),
                     "chapters": bool(p.get("chapters", True)),
+                    "on_error": p.get("on_error", "abort"),
                     "recursive": bool(p.get("recursive")),
                     "output": p.get("output", ""),
                 },

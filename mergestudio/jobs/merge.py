@@ -1,12 +1,15 @@
 """合并任务：无损直拷 / 智能转码 / 全量转码，含批量裁剪与合并后自检。"""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -21,6 +24,7 @@ from ..media import (
     parse_trim_seconds,
     probe_full,
     probe_output_summary,
+    work_dir_for,
     run_ffmpeg,
     scan_folder,
     signature,
@@ -29,6 +33,27 @@ from ..media import (
 from ..task import JOB, RUNNING_STATES
 
 # ======================== 拼接底层函数 ========================
+SEGMENT_RETRIES = 2
+_FATAL_HINTS = ("no space left", "permission denied", "invalid data",
+                "moov atom", "could not open", "cannot open",
+                "no such file", "文件不存在", "拒绝访问")
+
+
+def _retryable(err: str) -> bool:
+    """只有「看起来像偶发问题」的失败才自动重试；磁盘满/坏文件不重试。"""
+    low = (err or "").lower()
+    return not any(h in low for h in _FATAL_HINTS)
+
+
+def _params_hash(params: dict, files_info: list) -> str:
+    payload = {k: params.get(k) for k in
+               ("mode", "encoder", "crf", "preset", "size", "fps",
+                "trim_head", "trim_tail", "chapters", "crop")}
+    payload["files"] = [(i.get("path"), i.get("size")) for i in files_info]
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
 def keyframe_at_or_before(path: Path, t: float):
     """
     v4: 找 t 之前最近的关键帧时间；探测失败返回 None。
@@ -406,7 +431,8 @@ def finish_success(out: Path, fallback_duration: float,
                    source_duration: float = 0.0,
                    expected_duration: float = 0.0,
                    chapter_count: int = 0,
-                   expected_frames: int = 0):
+                   expected_frames: int = 0,
+                   skipped=None):
     """v4: 合并后自检 —— 时长 / 音视频同步 / 帧数 / 时间基 / 采样率 逐项核对"""
     info = probe_output_summary(out)
     final_dur = info.get("duration") or get_media_duration(out) or fallback_duration
@@ -446,7 +472,12 @@ def finish_success(out: Path, fallback_duration: float,
         "chapters": chapter_count,
         "level": level,
         "notes": notes,
+        "skipped": skipped or [],
     }
+    if skipped:
+        level = "warn"
+        report["level"] = "warn"
+        report["notes"].append(f"已跳过 {len(skipped)} 个失败分段")
 
     JOB.update(state="done", progress=1.0, message="拼接完成",
                final_duration=final_dur, final_size=final_size,
@@ -457,6 +488,10 @@ def finish_success(out: Path, fallback_duration: float,
     JOB.log(f"✅ 输出：{out}")
     JOB.log(f"   时长 {final_dur:.2f}s · 大小 {fmt_size(final_size)} · "
             f"转码 {encoded_count} 段 / 拷贝 {copied_count} 段")
+    if skipped:
+        JOB.log(f"⚠️ 跳过 {len(skipped)} 个失败分段："
+                + "、".join(s.get("name", "?") for s in skipped[:5])
+                + ("…" if len(skipped) > 5 else ""))
 
     # ---- v4 自检报告 ----
     JOB.log("─" * 46)
@@ -492,7 +527,7 @@ def finish_success(out: Path, fallback_duration: float,
 # ======================== 拼接主流程（并行转码+自定义顺序）========================
 def job_run(params: dict):
     JOB.reset()
-    tmp_dir = None
+    work = None
     try:
         folder = str(params.get("folder", "")).strip()
         if not folder:
@@ -541,6 +576,13 @@ def job_run(params: dict):
         trim_head = parse_trim_seconds(params.get("trim_head", 0))
         trim_tail = parse_trim_seconds(params.get("trim_tail", 0))
         want_chapters = bool(params.get("chapters", True))
+
+        # 失败处理由用户选择：abort = 中止整批（默认） / skip = 跳过失败集继续
+        on_error = str(params.get("on_error") or "abort").lower()
+        if on_error not in ("abort", "skip"):
+            on_error = "abort"
+        resume = bool(params.get("_resume"))
+        skipped_segments = []
 
         # ---- v6: 画面边框裁剪（去台标 / 去黑边） ----
         crop_cfg = params.get("crop") or {}
@@ -712,6 +754,52 @@ def job_run(params: dict):
         if trim_head < 0.05 and trim_tail < 0.05 and not crop_on:
             expected_frames = sum(int(i.get("nb_frames") or 0) for i in files_info)
 
+        # ---- 断点续跑：只对需要转码的分段保留中间结果 ----
+        enc_dir = None
+        reuse = {}
+        p_hash = _params_hash(params, files_info)
+        if mode != "copy":
+            work = work_dir_for(out, str(JOB.id))
+            state_file = work / "state.json"
+            if work.exists():
+                ok_resume = False
+                if resume and state_file.is_file():
+                    try:
+                        saved = json.loads(state_file.read_text(encoding="utf-8"))
+                        ok_resume = (saved.get("hash") == p_hash)
+                    except Exception:
+                        ok_resume = False
+                if not ok_resume:
+                    shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True, exist_ok=True)
+            enc_dir = work / "enc"
+            enc_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                state_file.write_text(json.dumps({"v": 1, "hash": p_hash},
+                                                 ensure_ascii=False),
+                                      encoding="utf-8")
+            except Exception:
+                pass
+            for i in range(len(files)):
+                cand = enc_dir / f"{i:05d}.mp4"
+                if cand.exists() and cand.stat().st_size > 1024:
+                    reuse[i] = cand
+            if reuse:
+                JOB.log(f"♻️ 断点续跑：复用 {len(reuse)} 个已完成分段"
+                        f"（共 {len(files)} 个）")
+
+        def _finish(enc_count, cp_count, kept_total, res, kept_frames=None):
+            res = res or {}
+            if kept_frames is None:
+                kept_frames = expected_frames
+            finish_success(out, kept_total, enc_count, cp_count, kept_total,
+                           expected_duration=res.get("total") or kept_total,
+                           chapter_count=res.get("chapters", 0),
+                           expected_frames=kept_frames,
+                           skipped=skipped_segments)
+            if work:
+                shutil.rmtree(work, ignore_errors=True)
+
         # ============ 模式 1：无损直拷 ============
         if actual_mode == "copy":
             JOB.update(state="copying", message=f"无损直拷 · {len(files)} 个文件",
@@ -721,11 +809,7 @@ def job_run(params: dict):
                 res = do_copy(files, out, total_sec, target_sr=target_sr,
                               target_ts=target_ts, trims=trims,
                               chapter_titles=chapter_titles)
-                res = res or {}
-                finish_success(out, total_sec, 0, len(files), source_duration,
-                               expected_duration=res.get("total") or expected_duration,
-                               chapter_count=res.get("chapters", 0),
-                               expected_frames=expected_frames)
+                _finish(0, len(files), total_sec, res, expected_frames)
                 return
             except RuntimeError as e:
                 if str(e) == "已取消":
@@ -744,8 +828,7 @@ def job_run(params: dict):
             JOB.log(f"模式：智能 · 多数派 {n_cp} 个无损拷贝，"
                     f"少数派 {n_enc} 个转码至 {w}x{h} @ {fps} · {parallel} 路并行")
 
-            tmp_dir = out.parent / f".merge_tmp_{os.getpid()}_{int(time.time())}"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir = enc_dir
 
             need_encode_secs = sum(eff_durations[i] for i in need_encode_indices) or 1.0
             progress_lock = threading.Lock()
@@ -776,40 +859,64 @@ def job_run(params: dict):
                         task_progress[idx] = frac * file_dur
                         _update_total()
 
-                try:
-                    encode_one(f, dst, w, h, fps,
-                               bool(files_info[idx].get("acodec")),
-                               crf, preset, encoder, durations[idx],
-                               _file_progress, lambda: JOB.cancel,
-                               target_sr=target_sr, target_ts=target_ts,
-                               trim=(trim_head, trim_tail), crop=crop_rect)
-                    with progress_lock:
-                        task_progress[idx] = file_dur
-                        _update_total()
-                    return idx, dst, True
-                except Exception as e:
-                    return idx, dst, False, str(e)
+                attempt = 0
+                while True:
+                    try:
+                        encode_one(f, dst, w, h, fps,
+                                   bool(files_info[idx].get("acodec")),
+                                   crf, preset, encoder, durations[idx],
+                                   _file_progress, lambda: JOB.cancel,
+                                   target_sr=target_sr, target_ts=target_ts,
+                                   trim=(trim_head, trim_tail), crop=crop_rect)
+                        with progress_lock:
+                            task_progress[idx] = file_dur
+                            _update_total()
+                        return idx, dst, True
+                    except Exception as e:
+                        msg = str(e)
+                        if msg == "已取消":
+                            return idx, dst, False, msg
+                        # 底层自动重试（不改变输出，只是重跑失败的转码）
+                        if attempt < SEGMENT_RETRIES and _retryable(msg):
+                            attempt += 1
+                            JOB.log(f"  ↻ 自动重试 {attempt}/{SEGMENT_RETRIES}："
+                                    f"{f.name[:34]}")
+                            time.sleep(1.0)
+                            continue
+                        return idx, dst, False, msg
 
-            # 线程池并行执行
-            results = {}
+            # 线程池并行执行（断点续跑：已完成的分段直接复用）
+            results = {i: reuse[i] for i in need_encode_indices if i in reuse}
+            for i in results:
+                task_progress[i] = eff_durations[i]
+            if reuse:
+                _update_total()
+            pending = [i for i in need_encode_indices if i not in reuse]
             with ThreadPoolExecutor(max_workers=max(1, parallel)) as ex:
-                futures = {ex.submit(_encode_task, i): i for i in need_encode_indices}
+                futures = {ex.submit(_encode_task, i): i for i in pending}
                 for future in as_completed(futures):
                     res = future.result()
                     if JOB.cancel:
                         raise RuntimeError("已取消")
                     idx, dst, ok = res[0], res[1], res[2]
                     if not ok:
+                        if on_error == "skip":
+                            skipped_segments.append({"name": files[idx].name,
+                                                     "reason": str(res[3])[:300]})
+                            JOB.log(f"⚠️ 跳过失败分段：{files[idx].name[:40]}")
+                            continue
                         raise RuntimeError(f"转码失败 {files[idx].name}: {res[3]}")
                     results[idx] = dst
 
             if JOB.cancel:
                 raise RuntimeError("已取消")
 
-            # 按原始顺序组装分段列表
-            segs, seg_trims = [], []
+            # 按原始顺序组装分段列表（失败且选择跳过的不参与合并）
+            segs, seg_trims, kept_titles, kept_idx = [], [], [], []
             for i in range(len(files)):
                 if i in need_encode_set:
+                    if i not in results:
+                        continue  # 转码失败且用户选择了「跳过」
                     # 已转码的分段：裁剪已在转码时完成，不能再剪一次
                     segs.append(results[i])
                     seg_trims.append({"head": 0.0, "tail": 0.0,
@@ -817,18 +924,27 @@ def job_run(params: dict):
                 else:
                     segs.append(files[i])
                     seg_trims.append(trims[i])
+                kept_idx.append(i)
+                if chapter_titles:
+                    kept_titles.append(chapter_titles[i])
+
+            if not segs:
+                raise RuntimeError("所有分段都失败了，没有可合并的内容")
+
+            kept_total = sum(eff_durations[i] for i in kept_idx)
+            if skipped_segments:
+                JOB.log(f"⚠️ 已跳过 {len(skipped_segments)} 个分段，"
+                        f"按剩余 {len(segs)} 段合并")
 
             JOB.update(state="copying", message="合并分段文件…",
                        progress=0.9, current_file="")
             JOB.log(f"合并 {len(segs)} 个分段…")
-            res = do_copy(segs, out, total_sec, target_sr=target_sr,
+            res = do_copy(segs, out, kept_total, target_sr=target_sr,
                           target_ts=target_ts, trims=seg_trims,
-                          chapter_titles=chapter_titles,
+                          chapter_titles=kept_titles or None,
                           on_progress=lambda f: JOB.update(progress=0.9 + 0.1 * f))
-            res = res or {}
-            finish_success(out, total_sec, n_enc, n_cp, source_duration,
-                           expected_duration=res.get("total") or expected_duration,
-                           chapter_count=res.get("chapters", 0))
+            _finish(len(results), n_cp, kept_total, res,
+                    0 if skipped_segments else expected_frames)
             return
 
         # ============ 模式 3：全部转码 + 并行 ============
@@ -837,8 +953,7 @@ def job_run(params: dict):
                        message=f"全部转码至 {w}x{h} @ {fps} · {parallel} 路并行")
             JOB.log(f"模式：全部转码 · {len(files)} 个 → {w}x{h} @ {fps} · {parallel} 路并行")
 
-            tmp_dir = out.parent / f".merge_tmp_{os.getpid()}_{int(time.time())}"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir = enc_dir
 
             progress_lock = threading.Lock()
             task_progress = {i: 0.0 for i in range(len(files))}
@@ -868,50 +983,80 @@ def job_run(params: dict):
                         task_progress[idx] = frac * file_dur
                         _update_total()
 
-                try:
-                    encode_one(f, dst, w, h, fps,
-                               bool(files_info[idx].get("acodec")),
-                               crf, preset, encoder, durations[idx],
-                               _file_progress, lambda: JOB.cancel,
-                               target_sr=target_sr, target_ts=target_ts,
-                               trim=(trim_head, trim_tail), crop=crop_rect)
-                    with progress_lock:
-                        task_progress[idx] = file_dur
-                        _update_total()
-                    return idx, dst, True
-                except Exception as e:
-                    return idx, dst, False, str(e)
+                attempt = 0
+                while True:
+                    try:
+                        encode_one(f, dst, w, h, fps,
+                                   bool(files_info[idx].get("acodec")),
+                                   crf, preset, encoder, durations[idx],
+                                   _file_progress, lambda: JOB.cancel,
+                                   target_sr=target_sr, target_ts=target_ts,
+                                   trim=(trim_head, trim_tail), crop=crop_rect)
+                        with progress_lock:
+                            task_progress[idx] = file_dur
+                            _update_total()
+                        return idx, dst, True
+                    except Exception as e:
+                        msg = str(e)
+                        if msg == "已取消":
+                            return idx, dst, False, msg
+                        # 底层自动重试（不改变输出，只是重跑失败的转码）
+                        if attempt < SEGMENT_RETRIES and _retryable(msg):
+                            attempt += 1
+                            JOB.log(f"  ↻ 自动重试 {attempt}/{SEGMENT_RETRIES}："
+                                    f"{f.name[:34]}")
+                            time.sleep(1.0)
+                            continue
+                        return idx, dst, False, msg
 
-            results = {}
+            # 断点续跑：已完成的分段直接复用
+            results = {i: reuse[i] for i in range(len(files)) if i in reuse}
+            for i in results:
+                task_progress[i] = eff_durations[i]
+            if reuse:
+                _update_total()
+            pending = [i for i in range(len(files)) if i not in reuse]
             with ThreadPoolExecutor(max_workers=max(1, parallel)) as ex:
-                futures = {ex.submit(_encode_task, i): i for i in range(len(files))}
+                futures = {ex.submit(_encode_task, i): i for i in pending}
                 for future in as_completed(futures):
                     res = future.result()
                     if JOB.cancel:
                         raise RuntimeError("已取消")
                     idx, dst, ok = res[0], res[1], res[2]
                     if not ok:
+                        if on_error == "skip":
+                            skipped_segments.append({"name": files[idx].name,
+                                                     "reason": str(res[3])[:300]})
+                            JOB.log(f"⚠️ 跳过失败分段：{files[idx].name[:40]}")
+                            continue
                         raise RuntimeError(f"转码失败 {files[idx].name}: {res[3]}")
                     results[idx] = dst
 
             if JOB.cancel:
                 raise RuntimeError("已取消")
 
-            segs = [results[i] for i in range(len(files))]
+            kept_idx = [i for i in range(len(files)) if i in results]
+            if not kept_idx:
+                raise RuntimeError("所有分段都失败了，没有可合并的内容")
+            segs = [results[i] for i in kept_idx]
             # 全部已转码（含裁剪），合并阶段不再二次裁剪
             seg_trims = [{"head": 0.0, "tail": 0.0, "dur": eff_durations[i]}
-                         for i in range(len(files))]
+                         for i in kept_idx]
+            kept_titles = ([chapter_titles[i] for i in kept_idx]
+                           if chapter_titles else None)
+            kept_total = sum(eff_durations[i] for i in kept_idx)
+            if skipped_segments:
+                JOB.log(f"⚠️ 已跳过 {len(skipped_segments)} 个分段，"
+                        f"按剩余 {len(segs)} 段合并")
 
             JOB.update(state="copying", message="合并分段文件…",
                        progress=0.9, current_file="")
-            res = do_copy(segs, out, total_sec, target_sr=target_sr,
+            res = do_copy(segs, out, kept_total, target_sr=target_sr,
                           target_ts=target_ts, trims=seg_trims,
-                          chapter_titles=chapter_titles,
+                          chapter_titles=kept_titles,
                           on_progress=lambda f: JOB.update(progress=0.9 + 0.1 * f))
-            res = res or {}
-            finish_success(out, total_sec, len(files), 0, source_duration,
-                           expected_duration=res.get("total") or expected_duration,
-                           chapter_count=res.get("chapters", 0))
+            _finish(len(segs), 0, kept_total, res,
+                    0 if skipped_segments else expected_frames)
             return
 
         raise RuntimeError(f"未知模式：{actual_mode}")
@@ -923,6 +1068,14 @@ def job_run(params: dict):
             JOB.update(state="error", message=str(e), error=str(e))
             JOB.log("ERROR: " + str(e))
             JOB.log(traceback.format_exc(limit=3))
-    finally:
-        if tmp_dir and tmp_dir.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        # 保留已完成分段，用户可在任务详情里选择「断点续跑」
+        if work:
+            cnt = 0
+            try:
+                cnt = len(list((work / "enc").glob("*.mp4")))
+            except Exception:
+                pass
+            JOB.update(work_dir=str(work), resume_count=cnt,
+                       resumable=bool(cnt))
+            if cnt:
+                JOB.log(f"💾 已保留 {cnt} 个已完成分段，可点「断点续跑」继续")

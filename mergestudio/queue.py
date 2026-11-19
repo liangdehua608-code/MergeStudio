@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
 
 from . import config as C
 from .jobs import run_task
-from .media import list_video_files, natural_key
+from .media import (compute_output_path, list_video_files, natural_key,
+                    work_dir_for)
 from .task import RUNNING_STATES, Task, bind_active
 
 class TaskQueue:
@@ -84,7 +86,13 @@ class TaskQueue:
         with self.lock:
             self.seq += 1
             folder = str(params.get("folder", "")).strip()
-            auto_name = Path(folder).name or "拼接任务"
+            target = str(params.get("target", "")).strip()
+            if folder:
+                auto_name = Path(folder).name
+            elif target:
+                auto_name = Path(target).stem
+            else:
+                auto_name = "任务"
             tid = f"T{self.seq:03d}"
             task = Task(tid, name or auto_name, params)
             self.tasks.append(task)
@@ -174,7 +182,18 @@ class TaskQueue:
             task.log("⏹ 收到取消指令，等待 ffmpeg 退出…")
             return True
 
-    def retry(self, tid: str) -> bool:
+    @staticmethod
+    def _cleanup_work(task) -> None:
+        """删除任务留下的中间分段（在输出目录下的 .merge_work_xxx）。"""
+        try:
+            out = compute_output_path(task.folder, task.params.get("output") or "")
+            if out.suffix == "":
+                out = out.with_suffix(".mp4")
+            shutil.rmtree(work_dir_for(out, task.id), ignore_errors=True)
+        except Exception:
+            pass
+
+    def retry(self, tid: str, resume: bool = False) -> bool:
         with self.lock:
             task = self.get(tid)
             if not task or task.state in RUNNING_STATES or task.state == "queued":
@@ -186,7 +205,12 @@ class TaskQueue:
                 task.cancel = False
                 task.started_at = 0.0
                 task.finished_at = 0.0
-                task.logs = ["🔁 已重新排队"]
+                task.logs = ["♻️ 从断点继续（复用已完成分段）" if resume
+                             else "🔁 已重新排队"]
+                if resume:
+                    task.params["_resume"] = True
+                else:
+                    task.params.pop("_resume", None)
             self.cond.notify_all()
             self._persist()
             return True
@@ -197,6 +221,7 @@ class TaskQueue:
             if not task or task.id == self.active_id:
                 return False
             self.tasks.remove(task)
+            self._cleanup_work(task)
             self._persist()
             return True
 
@@ -208,8 +233,11 @@ class TaskQueue:
             else:
                 keep = [t for t in self.tasks
                         if t.state not in ("done", "error", "canceled")]
-            removed = len(self.tasks) - len(keep)
+            gone = [t for t in self.tasks if t not in keep]
+            removed = len(gone)
             self.tasks = keep
+            for t in gone:
+                self._cleanup_work(t)
             self._persist()
             return removed
 

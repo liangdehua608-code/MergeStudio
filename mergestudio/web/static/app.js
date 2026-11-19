@@ -15,6 +15,7 @@ const S = {
   trim: { head: 0, tail: 0 },
   crop: { enabled: false, left: 0, top: 0, right: 0, bottom: 0, scale_back: false },
   audio: { scan: null },
+  split: { plan: null },
   detailId: "",
   view: "queue",
   busy: false,
@@ -122,6 +123,7 @@ const PAGES = {
   queue: { title: "任务队列", sub: "排队执行 · 单任务串行，互不抢占资源" },
   new: { title: "新建任务", sub: "选文件夹 → 预检 → 设参数 → 加入队列" },
   audio: { title: "提取音频", sub: "批量导出音轨 · m4a 直拷 / mp3 转码" },
+  split: { title: "视频切割", sub: "按章节或固定时长切开 · 勾选要导出的片段" },
   settings: { title: "设置", sub: "ffmpeg 引擎与默认参数" },
 };
 
@@ -138,6 +140,7 @@ function setRoute() {
   if (name === "queue") renderQueue();
   if (name === "new") { renderScan(); updateBar(); }
   if (name === "audio") renderAudio();
+  if (name === "split") renderSplit();
   if (name === "settings") loadConfig();
 }
 
@@ -150,7 +153,7 @@ function renderTopActions() {
       : running ? '<span class="pill brand">运行中 ' + running + "</span>"
       : '<span class="pill queued">队列空闲</span>';
     box.innerHTML = '<span class="pill queued">排队 ' + (c.queued || 0) + "</span>" + status;
-  } else if (S.view === "new" || S.view === "audio") {
+  } else if (S.view === "new" || S.view === "audio" || S.view === "split") {
     box.innerHTML = '<a class="btn sm" href="#/queue">← 返回队列</a>';
   } else {
     box.innerHTML = "";
@@ -260,6 +263,10 @@ function renderActive() {
     ? [(t.total_files || 0) + " 个文件",
        "音频 " + String(opts.audio_format || "m4a").toUpperCase(),
        "保留原音质"]
+    : opts.op === "split"
+    ? [(t.total_files || 0) + " 段",
+       opts.precise ? "精确切割（重编码）" : "流复制",
+       "可随时取消"]
     : [(t.total_files || 0) + " 个文件",
        MODE_TEXT[opts.mode] || opts.mode,
        trim > 0 ? "裁剪 " + trim + "s/集" : "不裁剪",
@@ -360,7 +367,7 @@ function renderTaskList() {
       '<div style="min-width:0">' +
         '<div class="task-name"><span class="nm" title="' + esc(t.name) + '">' + esc(t.name) + "</span>" +
           '<span class="op-tag ' + (opts.op === "audio" ? "audio" : "") + '">' +
-            (opts.op === "audio" ? "音频" : "合并") + "</span>" +
+            ({ merge: "合并", audio: "音频", split: "切割" }[opts.op] || "合并") + "</span>" +
           '<span class="pill ' + st.cls + '">' + st.text + "</span>" +
           (t.state === "running" || t.state === "scanning" || t.state === "copying" || t.state === "encoding"
             ? '<span class="pill brand num">' + pct + "%</span>" : "") +
@@ -623,6 +630,7 @@ function collectParams() {
     trim_head: S.trim.head,
     trim_tail: S.trim.tail,
     chapters: $("#f-chapters").checked,
+    on_error: $("#f-on-error").value,
     file_order: S.fileOrder.slice(),
   };
 }
@@ -753,6 +761,9 @@ async function loadDetail(id) {
     bits.push(chip("音频 " + String(opts.audio_format || "m4a").toUpperCase()));
     if (String(opts.audio_format || "m4a") === "mp3") bits.push(chip("音质 q" + (opts.audio_quality ?? 2)));
     if (opts.recursive) bits.push(chip("含子文件夹"));
+  } else if (opts.op === "split") {
+    bits.push(chip(opts.precise ? "精确切割（重编码）" : "流复制（关键帧对齐）"));
+    bits.push(chip((t.total_files || 0) + " 段"));
   } else {
     bits.push(chip("模式 " + (MODE_TEXT[opts.mode] || opts.mode)));
     bits.push(chip("编码 " + (opts.encoder || "—")));
@@ -769,11 +780,37 @@ async function loadDetail(id) {
     bits.push(chip("片头 -" + (opts.trim_head || 0) + "s"));
     bits.push(chip("片尾 -" + (opts.trim_tail || 0) + "s"));
     bits.push(chip(opts.chapters ? "写章节" : "不写章节"));
+    bits.push(chip(opts.on_error === "skip" ? "失败集跳过" : "失败即中止"));
     if (opts.recursive) bits.push(chip("含子文件夹"));
   }
   bits.push("</div></div>");
 
-  if (rep && rep.duration) {
+  if (rep && Array.isArray(rep.segments) && typeof rep.count === "number") {
+    const failed = rep.failed || [];
+    bits.push('<div class="d-sec"><h4>切割结果</h4>');
+    bits.push('<div class="rep-note ' + (rep.count ? "ok" : "warn") + '">' +
+      (rep.count ? "✅ 已导出 " + rep.count + " 段 · 合计 " + fmtDur(rep.duration || 0)
+                 : "⚠️ 没有成功导出任何片段") + "</div>");
+    bits.push('<div class="metrics">');
+    bits.push(metric("片段", rep.count + " / " + rep.total, ""));
+    bits.push(metric("总时长", fmtDur(rep.duration || 0), "ok"));
+    bits.push(metric("方式", rep.precise ? "精确" : "流复制", ""));
+    bits.push("</div>");
+    if (rep.segments && rep.segments.length) {
+      bits.push('<div style="margin-top:10px;font-size:11.5px;color:var(--muted);line-height:1.8">' +
+        rep.segments.slice(0, 12).map(s =>
+          "· " + esc(s.name) + " —— " + fmtDur(s.end - s.start)).join("<br>") +
+        (rep.segments.length > 12 ? "<br>… 其余 " + (rep.segments.length - 12) + " 段" : "") +
+        "</div>");
+    }
+    if (failed.length) {
+      bits.push('<div style="margin-top:8px;color:var(--bad);font-size:11.5px">失败 ' +
+        failed.length + " 段</div>");
+    }
+    bits.push("</div>");
+  }
+
+  if (rep && rep.duration && !rep.segments && !rep.format) {
     const deltaOk = Math.abs(rep.delta || 0) <= Math.max(2, (rep.expected_duration || 0) * 0.002);
     const syncOk = rep.sync_delta == null || rep.sync_delta <= 1;
     const frameOk = !rep.expected_frames || !rep.frames || Math.abs(rep.frames - rep.expected_frames) <= 2;
@@ -820,7 +857,11 @@ async function loadDetail(id) {
   }
   if (["done", "error", "canceled"].includes(t.state)) {
     if (t.output) acts.push('<button class="btn primary" data-dact="reveal">打开所在文件夹</button>');
-    acts.push('<button class="btn" data-dact="retry">再跑一次</button>');
+    if (t.resumable && t.resume_count) {
+      acts.push('<button class="btn primary" data-dact="resume">断点续跑（复用 ' +
+        t.resume_count + ' 段）</button>');
+    }
+    acts.push('<button class="btn" data-dact="retry">重新开始</button>');
     acts.push('<button class="btn" data-dact="remove">移除任务</button>');
   }
   bits.push('<div class="d-acts">' + acts.join("") + "</div>");
@@ -892,6 +933,15 @@ function bindEvents() {
     if (!btn) return;
     const id = $("#drawer").dataset.id;
     const act = btn.dataset.dact;
+    if (act === "resume") {
+      try {
+        await api("/api/queue/retry", { id, resume: true });
+        toast("已从断点继续（复用已完成分段）", "ok");
+        await refreshQueue();
+        loadDetail(id);
+      } catch (e) { toast(e.message, "bad"); }
+      return;
+    }
     if (act === "remove" || act === "cancel") {
       if (!confirm(act === "remove" ? "确定移除这个任务？" : "确定取消这个任务？")) return;
     }
@@ -911,6 +961,45 @@ function bindEvents() {
   });
   const dc = $("#btn-detect-crop");
   if (dc) dc.onclick = detectCrop;
+
+  // 视频切割
+  $("#p-plan").onclick = makeSplitPlan;
+  $("#p-pick").onclick = async () => {
+    const btn = $("#p-pick");
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const r = await api("/api/pick-video", { title: "选择要切割的视频" });
+      if (r.path) {
+        $("#p-target").value = r.path;
+        S.split.plan = null;
+        renderSplit();
+      }
+    } catch (e) { toast("打开失败：" + e.message, "bad"); }
+    finally { btn.disabled = false; btn.textContent = "浏览"; }
+  };
+  $("#p-mode").addEventListener("change", () => {
+    $("#p-minutes").disabled = $("#p-mode").value !== "time";
+    S.split.plan = null;
+    renderSplit();
+  });
+  $("#plan-body").addEventListener("change", e => {
+    const ck = e.target.closest(".plan-ck");
+    if (!ck || !S.split.plan) return;
+    const i = parseInt(ck.dataset.idx, 10);
+    if (S.split.plan.segments[i]) S.split.plan.segments[i].keep = ck.checked;
+    renderSplit();
+  });
+  $("#plan-all").onclick = () => {
+    if (!S.split.plan) return;
+    S.split.plan.segments.forEach(s => { s.keep = true; });
+    renderSplit();
+  };
+  $("#plan-none").onclick = () => {
+    if (!S.split.plan) return;
+    S.split.plan.segments.forEach(s => { s.keep = false; });
+    renderSplit();
+  };
+  $("#plan-enqueue").onclick = enqueueSplit;
 
   // 提取音频
   $("#a-scan").onclick = scanAudio;
@@ -1220,6 +1309,104 @@ async function enqueueAudio() {
   }
 }
 
+
+/* ================================================================
+ * v6：视频切割
+ * ================================================================ */
+function splitOutputName(path, index, title) {
+  const stem = String(path).replace(/\.[^.\\/]+$/, "").split(/[\\/]/).pop();
+  const clean = String(title || "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "").trim();
+  return stem + "_P" + String(index + 1).padStart(2, "0") +
+    (clean ? "_" + clean.slice(0, 40) : "") + ".mp4";
+}
+
+function renderSplit() {
+  const plan = S.split.plan;
+  const panel = $("#plan-panel");
+  if (!plan || !plan.segments || !plan.segments.length) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+
+  const picked = plan.segments.filter(s => s.keep !== false);
+  const total = picked.reduce((a, s) => a + s.duration, 0);
+  $("#plan-count").textContent = plan.segments.length;
+  $("#plan-desc").textContent =
+    (plan.path.split(/[\\/]/).pop()) + " · 共 " + plan.segments.length +
+    " 段 · 已选 " + picked.length + " 段 · 合计 " + fmtDur(total) +
+    (plan.mode === "chapters" ? " · 按章节" : " · 按固定时长");
+
+  $("#plan-body").innerHTML = plan.segments.map((s, i) =>
+    '<tr data-idx="' + i + '">' +
+      '<td><input type="checkbox" class="plan-ck" data-idx="' + i + '"' +
+        (s.keep !== false ? " checked" : "") + "></td>" +
+      "<td>" + (i + 1) + "</td>" +
+      '<td class="name" title="' + esc(s.title) + '">' + esc(s.title) + "</td>" +
+      "<td>" + fmtDurPrecise(s.start) + "</td>" +
+      "<td>" + fmtDur(s.duration) + "</td>" +
+      '<td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis">' +
+        esc(splitOutputName(plan.path, i, s.title)) + "</td>" +
+    "</tr>").join("");
+
+  $("#plan-enqueue").disabled = !picked.length;
+}
+
+async function makeSplitPlan() {
+  const target = $("#p-target").value.trim();
+  if (!target) return toast("请先选择视频文件", "bad");
+  if (!(S.cfg && S.cfg.ready)) return toast("ffmpeg 未就绪，请先到设置页配置", "bad");
+  const btn = $("#p-plan");
+  btn.disabled = true; btn.textContent = "分析中…";
+  try {
+    const r = await api("/api/split/plan", {
+      path: target,
+      mode: $("#p-mode").value,
+      minutes: parseFloat($("#p-minutes").value) || 30,
+    });
+    if (!r.ok) {
+      S.split.plan = null;
+      renderSplit();
+      toast(r.error || "无法生成切割方案", "bad");
+      return;
+    }
+    r.segments.forEach(s => { s.keep = true; });
+    S.split.plan = r;
+    renderSplit();
+    toast("已生成 " + r.segments.length + " 段", "ok");
+  } catch (e) {
+    toast("生成失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = "生成方案";
+  }
+}
+
+async function enqueueSplit() {
+  const plan = S.split.plan;
+  if (!plan) return;
+  const segs = plan.segments.filter(s => s.keep !== false)
+    .map(s => ({ start: s.start, end: s.end, title: s.title }));
+  if (!segs.length) return toast("至少勾选一段", "bad");
+  const btn = $("#plan-enqueue");
+  btn.disabled = true; btn.textContent = "加入中…";
+  try {
+    await api("/api/queue/add", {
+      op: "split",
+      target: plan.path,
+      output: $("#p-output").value.trim(),
+      precise: $("#p-precise").checked,
+      segments: segs,
+    });
+    toast("切割任务已加入队列", "ok");
+    await refreshQueue();
+    location.hash = "#/queue";
+  } catch (e) {
+    toast("加入失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = "加入队列";
+  }
+}
+
 /* ---------------- 启动 ---------------- */
 (async function init() {
   bindEvents();
@@ -1239,6 +1426,8 @@ async function enqueueAudio() {
     renderOutHint();
   }
   // ?crop=60 → 直接带上「去顶部 60px」的裁剪参数
+  const preVideo = qp.get("video");
+  if (preVideo) $("#p-target").value = preVideo;
   const cropPre = qp.get("crop");
   if (cropPre) {
     $("#f-crop").checked = true;
@@ -1246,13 +1435,18 @@ async function enqueueAudio() {
   }
 
   // 打开时若有任务在跑，直接落在队列页
-  if (!location.hash) location.hash = pre ? "#/new" : "#/queue";
+  if (!location.hash) {
+    location.hash = preVideo ? "#/split" : (pre ? "#/new" : "#/queue");
+  }
   setRoute();
   renderScan();
   updateTrimHint();
   updateBar();
   $("#a-quality").disabled = $("#a-format").value !== "mp3";
   renderAudio();
+  $("#p-minutes").disabled = $("#p-mode").value !== "time";
+  renderSplit();
+  if (preVideo && qp.get("plan") === "1") setTimeout(makeSplitPlan, 120);
   if (pre && qp.get("scan") === "1") {
     setTimeout(() => (location.hash === "#/audio" ? scanAudio() : doScan()), 80);
   }

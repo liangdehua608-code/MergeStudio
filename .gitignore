@@ -17,3 +17,6 @@ _smoke/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 本地测试用临时目录
+_t/

@@ -10,6 +10,9 @@ def run_task(params: dict):
     if op == "audio":
         from .audio import audio_run
         return audio_run(params)
+    if op == "split":
+        from .split import split_run
+        return split_run(params)
     # 默认合并；也接受显式的 merge
     from .merge import job_run
     return job_run(params)

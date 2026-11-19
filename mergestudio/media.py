@@ -597,3 +597,34 @@ def extract_frame(path: Path, t: float = 2.0, width: int = 720) -> bytes:
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError("抽帧失败")
     return r.stdout
+
+
+def work_dir_for(out: Path, task_id: str) -> Path:
+    """断点续跑的工作目录：放在输出目录下，和任务一起清理。"""
+    import re as _re
+    safe = _re.sub(r"[^0-9A-Za-z_-]", "", str(task_id or "")) or "adhoc"
+    return Path(out).parent / f".merge_work_{safe}"
+
+
+def probe_chapters(path: Path) -> list:
+    """读取视频内嵌章节（ffmpeg 写入的章节会被识别为章节，不是字幕轨）。"""
+    try:
+        r = subprocess.run(
+            [C.FFPROBE, "-v", "error", "-print_format", "json",
+             "-show_chapters", str(path)],
+            capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace")
+        data = json.loads(r.stdout or "{}")
+    except Exception:
+        return []
+    out = []
+    for ch in data.get("chapters", []) or []:
+        try:
+            start = float(ch.get("start_time") or 0)
+            end = float(ch.get("end_time") or 0)
+        except Exception:
+            continue
+        title = ((ch.get("tags") or {}).get("title") or "").strip()
+        if end > start:
+            out.append({"start": start, "end": end, "title": title})
+    return out

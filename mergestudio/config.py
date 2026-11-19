@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 APP_NAME = "视频拼接工坊"
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.1.0"
 APP_ID = "merge-studio"
 DEFAULT_PORT = 8760
 
@@ -156,6 +156,30 @@ def pick_folder_dialog(title="选择文件夹"):
             root.attributes("-topmost", True)
             root.update()
             path = filedialog.askdirectory(title=title)
+            root.destroy()
+            return {"ok": True, "path": path or ""}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+
+def pick_file_dialog(title="选择文件", patterns=None):
+    """选择单个文件（用于切割目标）。"""
+    with TK_LOCK:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception as e:
+            return {"ok": False, "error": f"tkinter 不可用：{e}"}
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            root.update()
+            if patterns:
+                ft = [("视频文件", " ".join(patterns)), ("所有文件", "*.*")]
+            else:
+                ft = [("所有文件", "*.*")]
+            path = filedialog.askopenfilename(title=title, filetypes=ft)
             root.destroy()
             return {"ok": True, "path": path or ""}
         except Exception as e:
