@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行数据（本机配置与历史）
+.mergestudio/
+
+# 测试/临时产物
+_smoke/
+*.log
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

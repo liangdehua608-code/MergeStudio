@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>视频拼接工坊 v6 · MergeStudio</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <!-- ============ 侧栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" opacity=".0"/><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3h9A2.5 2.5 0 0 1 19 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 18.5z"/><path d="M10 9.2v5.6l4.4-2.8z" fill="currentColor" stroke="none"/></svg>
+      </div>
+      <div class="brand-text">
+        <div class="brand-name">视频拼接工坊</div>
+        <div class="brand-sub">Merge Studio v6</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-label">工作台</div>
+      <a class="nav-item" href="#/queue" data-nav="queue">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 12h8M4 18h13"/><circle cx="19" cy="6" r="2"/></svg>
+        <span class="lbl">任务队列</span><span class="nav-badge" id="nav-badge">0</span>
+      </a>
+      <a class="nav-item" href="#/new" data-nav="new">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        <span class="lbl">新建任务</span>
+      </a>
+      <a class="nav-item" href="#/audio" data-nav="audio">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v10"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="14" r="2.5"/></svg>
+        <span class="lbl">提取音频</span>
+      </a>
+      <a class="nav-item" href="#/settings" data-nav="settings">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        <span class="lbl">设置</span>
+      </a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="engine" id="engine-card">
+        <div class="engine-top"><i class="engine-dot"></i><span id="engine-text">检测 ffmpeg…</span></div>
+        <div class="engine-path" id="engine-path">—</div>
+      </div>
+      <div class="side-note">本地运行 · 文件不外传</div>
+    </div>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="page-title">任务队列</h1>
+        <p class="sub" id="page-sub">排队执行 · 单任务串行，互不抢占资源</p>
+      </div>
+      <div class="top-actions" id="top-actions"></div>
+    </header>
+
+    <div class="content">
+      <!-- ---------- 队列页 ---------- -->
+      <section class="view active" data-view="queue">
+        <div class="stats" id="stats"></div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">执行中</h2>
+              <p class="panel-desc" id="active-desc">队列空闲时会自动开始下一个任务</p>
+            </div>
+            <div class="head-actions">
+              <button class="btn sm" id="btn-pause">暂停队列</button>
+              <a class="btn sm primary" href="#/new">＋ 新建任务</a>
+            </div>
+          </div>
+          <div id="active-box"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">全部任务 <span class="count" id="task-count">0</span></h2>
+              <p class="panel-desc">点击任务可查看自检报告与完整日志；排队中可用 ↑ ↓ 调序</p>
+            </div>
+            <div class="head-actions">
+              <button class="btn ghost sm" id="btn-clear">清理已完成</button>
+            </div>
+          </div>
+          <div id="task-list" class="task-list"></div>
+        </div>
+      </section>
+
+      <!-- ---------- 新建任务 ---------- -->
+      <section class="view" data-view="new">
+        <div class="panel step" id="step1">
+          <div class="step-head">
+            <span class="step-no">1</span>
+            <div><h3>源文件夹</h3><p>选择要拼接的文件夹，扫描后可以预检、排序、裁剪</p></div>
+            <span class="step-state" id="s1-badge"></span>
+          </div>
+          <div class="path-row">
+            <div class="input-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+              <input id="f-folder" class="input" placeholder="例如 E:\videos\城市轨道交通行车组织">
+            </div>
+            <button class="btn" id="btn-pick-folder">浏览</button>
+            <button class="btn primary" id="btn-scan">扫描</button>
+          </div>
+          <div class="opt-row">
+            <label class="switch"><input type="checkbox" id="f-recursive"><span class="track"></span>包含子文件夹</label>
+            <label class="switch"><input type="checkbox" id="f-batch"><span class="track"></span>批量模式：每个子文件夹各建一个任务</label>
+          </div>
+          <details class="adv">
+            <summary>输出目录（可选）</summary>
+            <div class="adv-body">
+              <div class="path-row">
+                <input id="f-output" class="input" placeholder="留空 = 输出到每个源文件夹内，文件名 &lt;文件夹名&gt;_merged.mp4">
+                <button class="btn" id="btn-pick-out">浏览</button>
+              </div>
+              <p class="panel-desc" id="out-hint" style="margin-top:8px"></p>
+            </div>
+          </details>
+        </div>
+
+        <div class="panel step" id="step2">
+          <div class="step-head">
+            <span class="step-no">2</span>
+            <div><h3>预检清单</h3><p>先看健康度与参数分布，拼之前就知道风险在哪</p></div>
+            <span class="step-state" id="s2-badge"></span>
+          </div>
+          <div class="empty-inline" id="scan-empty">还没有扫描结果 —— 选好文件夹后点上方「扫描」</div>
+          <div id="scan-body" class="hidden">
+            <div class="health-bar" id="health-bar"></div>
+            <div class="group-bar" id="group-bar"></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr>
+                  <th style="width:30px"></th>
+                  <th style="width:40px">#</th>
+                  <th>文件名（可拖拽排序）</th>
+                  <th style="width:100px">分辨率</th>
+                  <th style="width:56px">编码</th>
+                  <th style="width:72px">大小</th>
+                  <th style="width:126px">时长</th>
+                  <th style="width:76px">状态</th>
+                </tr></thead>
+                <tbody id="file-body"></tbody>
+              </table>
+            </div>
+            <p class="panel-desc" id="scan-note" style="margin-top:10px"></p>
+          </div>
+        </div>
+
+        <div class="panel step" id="step3">
+          <div class="step-head">
+            <span class="step-no">3</span>
+            <div><h3>拼接参数</h3><p>默认值已针对网课场景调好，一般只需要设置片头片尾</p></div>
+            <span class="step-state" id="s3-badge"></span>
+          </div>
+
+          <div class="mode-grid" id="mode-grid">
+            <label class="mode"><input type="radio" name="mode" value="auto" checked>
+              <div class="box"><div class="t">自动 · 推荐</div>
+              <div class="d">参数一致时无损直拷，少数派单独转码后再合并</div></div></label>
+            <label class="mode"><input type="radio" name="mode" value="copy">
+              <div class="box"><div class="t">无损直拷</div>
+              <div class="d">全部流复制，最快且零画质损失，参数不一致时可能失败</div></div></label>
+            <label class="mode"><input type="radio" name="mode" value="encode">
+              <div class="box"><div class="t">全部转码</div>
+              <div class="d">统一压成同一规格，最保险但最慢</div></div></label>
+          </div>
+
+          <div class="grid3" style="margin-top:18px">
+            <label class="field">片头剪掉（秒）
+              <input id="trim-head" class="input" type="number" min="0" step="0.5" value="0" placeholder="0">
+            </label>
+            <label class="field">片尾剪掉（秒）
+              <input id="trim-tail" class="input" type="number" min="0" step="0.5" value="0" placeholder="0">
+            </label>
+            <div class="field">章节标记
+              <label class="switch" style="height:38px"><input type="checkbox" id="f-chapters" checked><span class="track"></span>每集一个播放器可跳转的章节</label>
+            </div>
+          </div>
+          <p class="panel-desc" id="trim-hint" style="margin-top:10px">填 0 表示不裁剪。片头动画、片尾点赞投币可以一次性去掉。</p>
+
+
+          <details class="adv" id="crop-adv">
+            <summary>画面裁剪 · 去台标 / 去黑边</summary>
+            <div class="adv-body">
+              <div class="opt-row" style="margin-top:0">
+                <label class="switch"><input type="checkbox" id="f-crop"><span class="track"></span>启用画面裁剪</label>
+                <span class="panel-desc" style="margin:0">裁剪需要重编码，会强制该任务「全部转码」</span>
+              </div>
+              <div id="crop-body" class="hidden">
+                <div class="crop-wrap">
+                  <div class="crop-canvas" id="crop-canvas">
+                    <img id="crop-img" class="crop-img" alt="">
+                    <div class="crop-strip s-top" id="strip-top"></div>
+                    <div class="crop-strip s-bottom" id="strip-bottom"></div>
+                    <div class="crop-strip s-left" id="strip-left"></div>
+                    <div class="crop-strip s-right" id="strip-right"></div>
+                    <div class="crop-keep" id="crop-keep"></div>
+                    <span class="crop-size" id="crop-size">等待扫描</span>
+                  </div>
+                  <div class="crop-side">
+                    <div class="chips" style="margin-top:0">
+                      <button class="btn sm" data-crop-preset="top60">去顶部 60</button>
+                      <button class="btn sm" data-crop-preset="top80">去顶部 80</button>
+                      <button class="btn sm" data-crop-preset="tb40">上下各 40</button>
+                      <button class="btn sm" data-crop-preset="reset">重置</button>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
+                      <label class="field">上（px）<input id="crop-top" class="input" type="number" min="0" step="2" value="0"></label>
+                      <label class="field">下（px）<input id="crop-bottom" class="input" type="number" min="0" step="2" value="0"></label>
+                      <label class="field">左（px）<input id="crop-left" class="input" type="number" min="0" step="2" value="0"></label>
+                      <label class="field">右（px）<input id="crop-right" class="input" type="number" min="0" step="2" value="0"></label>
+                    </div>
+                    <label class="switch" style="margin-top:10px"><input type="checkbox" id="crop-scale-back"><span class="track"></span>裁完缩放回原分辨率</label>
+                    <div class="chips" style="margin-top:10px">
+                      <button class="btn sm" id="btn-detect-crop">自动检测黑边</button>
+                    </div>
+                    <p class="panel-desc" id="crop-hint" style="margin-top:8px">自动检测只识别黑边；台标请用上面的预设或手填像素。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="adv">
+            <summary>高级参数 · 编码器 / 并行 / 画质 / 分辨率</summary>
+            <div class="adv-body">
+              <div class="grid3">
+                <label class="field">视频编码器
+                  <select id="f-encoder" class="input">
+                    <option value="libx264">CPU 软件编码 (libx264)</option>
+                    <option value="h264_nvenc">NVIDIA NVENC 硬件加速</option>
+                    <option value="h264_qsv">Intel QSV 核显加速</option>
+                    <option value="h264_amf">AMD AMF 硬件加速</option>
+                  </select>
+                </label>
+                <label class="field">并行转码数
+                  <select id="f-parallel" class="input">
+                    <option value="1">1 路（最省资源）</option>
+                    <option value="2" selected>2 路（均衡）</option>
+                    <option value="4">4 路（高性能）</option>
+                    <option value="8">8 路（拉满性能）</option>
+                  </select>
+                </label>
+                <label class="field">质量 CRF（越小越清晰）
+                  <input id="f-crf" class="input" type="number" min="0" max="51" value="20">
+                </label>
+                <label class="field">编码预设
+                  <select id="f-preset" class="input">
+                    <option value="ultrafast">ultrafast</option>
+                    <option value="veryfast" selected>veryfast</option>
+                    <option value="fast">fast</option>
+                    <option value="medium">medium</option>
+                    <option value="slow">slow</option>
+                  </select>
+                </label>
+                <label class="field">输出分辨率（可选）
+                  <input id="f-size" class="input" placeholder="如 1920x1080，留空跟随源">
+                </label>
+                <label class="field">输出帧率（可选）
+                  <input id="f-fps" class="input" placeholder="如 30 或 30000/1001">
+                </label>
+              </div>
+              <p class="panel-desc" style="margin-top:12px">批量模式下，同一套参数会应用到每个子文件夹任务。</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ---------- 设置 ---------- -->
+
+      <section class="view" data-view="audio">
+        <div class="panel">
+          <div class="panel-head">
+            <div><h2 class="panel-title">提取音频</h2>
+              <p class="panel-desc">批量把视频音轨导出为 m4a（直接复制、最快）或 mp3</p></div>
+          </div>
+          <div class="path-row">
+            <div class="input-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+              <input id="a-folder" class="input" placeholder="选择课程文件夹，例如 E://videos//课程01">
+            </div>
+            <button class="btn" id="a-pick">浏览</button>
+            <button class="btn" id="a-scan">扫描</button>
+          </div>
+          <div class="opt-row">
+            <label class="switch"><input type="checkbox" id="a-recursive"><span class="track"></span>包含子文件夹</label>
+          </div>
+          <div class="grid3" style="margin-top:16px">
+            <label class="field">输出格式
+              <select id="a-format" class="input">
+                <option value="m4a">M4A · 直接复制音轨（最快、无损）</option>
+                <option value="mp3">MP3 · libmp3lame 转码</option>
+              </select>
+            </label>
+            <label class="field">MP3 音质（0 最好）
+              <select id="a-quality" class="input">
+                <option value="0">0 · 约 245kbps</option>
+                <option value="2" selected>2 · 约 190kbps</option>
+                <option value="4">4 · 约 165kbps</option>
+                <option value="6">6 · 约 130kbps</option>
+              </select>
+            </label>
+            <label class="field">输出目录（可选）
+              <input id="a-output" class="input" placeholder="留空 = 输出到每个视频同目录">
+            </label>
+          </div>
+          <div class="hint" style="margin-top:10px">输出文件名与视频同名，扩展名换成 m4a / mp3，不会覆盖源视频。</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div><h2 class="panel-title">待处理文件 <span class="count" id="a-count">0</span></h2>
+              <p class="panel-desc" id="a-desc">扫描后可确认文件数量与总时长</p></div>
+            <div class="head-actions">
+              <button class="btn primary" id="a-enqueue">加入队列</button>
+            </div>
+          </div>
+          <div class="empty-inline" id="a-list">还没有扫描结果 —— 选好文件夹后点「扫描」</div>
+        </div>
+      </section>
+
+      <section class="view" data-view="settings">
+        <div class="panel">
+          <div class="panel-head">
+            <div><h2 class="panel-title">ffmpeg 引擎</h2>
+              <p class="panel-desc">程序本身只负责调度，转码/拼接全部由 ffmpeg 完成</p></div>
+            <span class="pill" id="cfg-pill">未检测</span>
+          </div>
+          <div id="cfg-banner" class="banner warn">正在检测…</div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <label class="field">ffmpeg 路径
+              <div class="path-row">
+                <input id="cfg-ffmpeg" class="input" placeholder="ffmpeg.exe / bin 目录 / ffmpeg">
+                <button class="btn" id="btn-browse-ffmpeg">浏览</button>
+              </div>
+            </label>
+            <label class="field">ffprobe 路径（留空自动取 ffmpeg 同目录）
+              <div class="path-row">
+                <input id="cfg-ffprobe" class="input" placeholder="留空自动推导 ffprobe.exe">
+                <button class="btn" id="btn-browse-ffprobe">浏览</button>
+              </div>
+            </label>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:14px;flex-wrap:wrap">
+            <button class="btn primary" id="btn-save-cfg">验证并保存</button>
+            <span class="panel-desc" id="cfg-file" style="margin:0"></span>
+          </div>
+          <div class="kv" style="margin-top:14px"><span class="k">ffmpeg</span><span class="v" id="cfg-ff-ver">—</span></div>
+          <div class="kv"><span class="k">ffprobe</span><span class="v" id="cfg-fp-ver">—</span></div>
+        </div>
+
+        <div class="set-grid">
+          <div class="panel">
+            <div class="panel-head"><div><h2 class="panel-title">默认参数</h2>
+              <p class="panel-desc">保存在本机浏览器，新建任务时自动带出</p></div></div>
+            <div class="grid3" style="grid-template-columns:1fr 1fr">
+              <label class="field">默认模式
+                <select id="d-mode" class="input">
+                  <option value="auto">自动（推荐）</option>
+                  <option value="copy">无损直拷</option>
+                  <option value="encode">全部转码</option>
+                </select>
+              </label>
+              <label class="field">默认编码器
+                <select id="d-encoder" class="input">
+                  <option value="libx264">CPU libx264</option>
+                  <option value="h264_nvenc">NVIDIA NVENC</option>
+                  <option value="h264_qsv">Intel QSV</option>
+                  <option value="h264_amf">AMD AMF</option>
+                </select>
+              </label>
+              <label class="field">默认片头（秒）
+                <input id="d-head" class="input" type="number" min="0" step="0.5" value="0">
+              </label>
+              <label class="field">默认片尾（秒）
+                <input id="d-tail" class="input" type="number" min="0" step="0.5" value="0">
+              </label>
+            </div>
+            <div style="margin-top:14px"><button class="btn" id="btn-save-defaults">保存默认参数</button></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><div><h2 class="panel-title">关于</h2>
+              <p class="panel-desc">v6 把工具拆成可维护的包：队列 + 合并/裁剪 + 提取音频，全部本地运行</p></div></div>
+            <div class="chips">
+              <span class="chip">任务队列</span><span class="chip">暂停 / 重试</span>
+              <span class="chip">优先级排序</span><span class="chip">批量建任务</span>
+              <span class="chip">合并前预检</span><span class="chip">片头片尾裁剪</span>
+              <span class="chip">画面裁剪 / 去台标</span><span class="chip">章节标记</span>
+              <span class="chip">合并后自检</span><span class="chip">提取音频</span>
+              <span class="chip">硬件编码</span><span class="chip">本地运行</span>
+            </div>
+            <p class="panel-desc" style="margin-top:14px;line-height:1.8">
+              队列采用单 worker 串行执行：同一时刻只有一个 ffmpeg 在跑，
+              不会因为多任务抢占磁盘导致所有任务一起变慢。批处理多门课程时，
+              把任务排好队然后去睡觉就行。
+            </p>
+            <div class="kv" style="margin-top:14px"><span class="k">版本</span><span class="v">6.0</span></div>
+            <div class="kv"><span class="k">接口</span><span class="v mono">/api/queue · /api/task</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- 新建任务底部操作条 -->
+<div class="act-bar hidden" id="act-bar">
+  <div class="act-inner">
+    <div class="act-sum" id="act-sum">尚未扫描</div>
+    <div class="act-acts">
+      <button class="btn" id="btn-reset">重置</button>
+      <button class="btn primary lg" id="btn-enqueue">加入队列</button>
+    </div>
+  </div>
+</div>
+
+<!-- 任务详情抽屉 -->
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div style="min-width:0">
+      <div class="eyebrow">任务详情</div>
+      <h2 id="d-name">—</h2>
+      <div class="p" id="d-path">—</div>
+    </div>
+    <button class="icon-btn" id="d-close" title="关闭" style="margin-left:auto">✕</button>
+  </div>
+  <div class="drawer-body" id="d-body"></div>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
