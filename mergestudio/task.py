@@ -3,6 +3,9 @@
 任务字段刻意与早期单文件版本的全局 JOB 保持一致，这样 jobs 里的处理函数
 可以直接用 `JOB.update(...)` / `JOB.log(...)`，由代理转发到当前线程（或当前
 活动任务）上，互不串台。
+
+`to_row` / `from_row` 负责队列落盘：重启后排队中的任务要能原样恢复，
+跑到一半的任务则退回排队并标记「复用已完成分段」。
 """
 from __future__ import annotations
 
@@ -11,16 +14,11 @@ import time
 from pathlib import Path
 
 RUNNING_STATES = ("running", "scanning", "copying", "encoding")
+FINISHED_STATES = ("done", "error", "canceled")
 
 
 class Task:
-    """
-    一个拼接任务。
-
-    字段名刻意与 v4 的 JOB 保持一致（state/message/progress/logs/...），
-    这样 job_run / do_copy / encode_one 里的 JOB.xxx 调用可以原封不动地复用，
-    由下面的 _JobProxy 把读写转发到「当前线程正在跑的那个任务」。
-    """
+    """一个处理任务（合并 / 切割 / 单视频 / 音频 / 音视频合并）。"""
 
     def __init__(self, tid: str, name: str, params: dict):
         self.lock = threading.Lock()
@@ -46,6 +44,7 @@ class Task:
         self.progress = 0.0
         self.current_file = ""
         self.output = ""
+        self.output_note = ""
         self.total_files = 0
         self.done_files = 0
         self.cancel = False
@@ -75,7 +74,7 @@ class Task:
         with self.lock:
             for k, v in kw.items():
                 setattr(self, k, v)
-            if kw.get("state") in ("done", "error", "canceled"):
+            if kw.get("state") in FINISHED_STATES:
                 self.finished_at = self.finished_at or time.time()
 
     def log(self, line: str):
@@ -88,8 +87,7 @@ class Task:
         with self.lock:
             now = time.time()
             if self.started_at:
-                end = self.finished_at or now
-                elapsed = max(0.0, end - self.started_at)
+                elapsed = max(0.0, (self.finished_at or now) - self.started_at)
             else:
                 elapsed = 0.0
             p = self.params or {}
@@ -102,6 +100,7 @@ class Task:
                 "progress": round(float(self.progress or 0), 4),
                 "current_file": self.current_file,
                 "output": self.output,
+                "output_note": self.output_note,
                 "total_files": self.total_files,
                 "done_files": self.done_files,
                 "final_duration": self.final_duration,
@@ -137,6 +136,10 @@ class Task:
                     "on_error": p.get("on_error", "abort"),
                     "recursive": bool(p.get("recursive")),
                     "output": p.get("output", ""),
+                    "overwrite": bool(p.get("overwrite")),
+                    "volume": p.get("volume", 100),
+                    "fit": p.get("fit", "shortest"),
+                    "precise": bool(p.get("precise")),
                 },
             }
             if full:
@@ -145,6 +148,45 @@ class Task:
             else:
                 data["log_tail"] = self.logs[-1] if self.logs else ""
             return data
+
+    # --- 队列落盘 ---
+    _ROW_FIELDS = (
+        "id", "name", "folder", "state", "message", "progress", "current_file",
+        "output", "output_note", "total_files", "done_files", "final_duration",
+        "final_size", "encoded_count", "copied_count", "source_duration",
+        "duration_delta", "report", "error", "work_dir", "resume_count",
+        "resumable", "created_at", "started_at", "finished_at",
+    )
+
+    def to_row(self) -> dict:
+        """序列化成可写盘的字典（日志只留最后 120 行，避免文件膨胀）。"""
+        with self.lock:
+            row = {k: getattr(self, k, None) for k in self._ROW_FIELDS}
+            row["params"] = dict(self.params)
+            row["logs"] = list(self.logs[-120:])
+            return row
+
+    @classmethod
+    def from_row(cls, row: dict) -> "Task":
+        """从落盘数据恢复；上次正在跑的任务退回排队并标记可续跑。"""
+        params = row.get("params")
+        task = cls(str(row.get("id") or ""), str(row.get("name") or "任务"),
+                   params if isinstance(params, dict) else {})
+        for key in cls._ROW_FIELDS:
+            if key in row:
+                setattr(task, key, row[key])
+        logs = row.get("logs")
+        task.logs = [str(x) for x in logs][-120:] if isinstance(logs, list) else []
+        task.cancel = False
+
+        if task.state in RUNNING_STATES:
+            task.state = "queued"
+            task.message = "上次运行被中断，已重新排队"
+            task.started_at = 0.0
+            task.finished_at = 0.0
+            task.params["_resume"] = True
+            task.logs.append("♻️ 上次运行被中断，已重新排队（已完成的分段会被复用）")
+        return task
 
 
 _TLS = threading.local()

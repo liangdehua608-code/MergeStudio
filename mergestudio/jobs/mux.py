@@ -4,7 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import config as C
-from ..media import probe_full, probe_media, run_ffmpeg
+from .. import subtitles
+from ..media import guard_output, probe_full, probe_media, run_ffmpeg
 from ..task import JOB
 
 
@@ -65,13 +66,17 @@ def mux_run(params: dict):
             out.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             raise RuntimeError(f"无法创建输出目录：{e}")
-        if out.resolve() == video.resolve():
-            raise RuntimeError("输出文件不能与源视频相同，请换一个输出目录")
+        out, out_note = guard_output(out, [video],
+                                     overwrite=C.overwrite_allowed(params))
+        if out_note:
+            JOB.log("🛡 " + out_note)
+
+        subs = subtitles.plan([v_info.get("subtitle_codecs") or []], out.suffix)
 
         target_dur = v_dur if fit == "video" else min(v_dur or a_dur, a_dur or v_dur)
 
-        JOB.update(output=str(out), total_files=1, done_files=0,
-                   state="copying", source_duration=target_dur,
+        JOB.update(output=str(out), output_note=out_note, total_files=1,
+                   done_files=0, state="copying", source_duration=target_dur,
                    message="正在合并音视频…")
         JOB.log(f"🎬 视频：{video.name}（{v_dur:.1f}s）")
         JOB.log(f"🎧 音频：{audio.name}（{a_dur:.1f}s）")
@@ -94,13 +99,15 @@ def mux_run(params: dict):
             cmd += ["-map", "0:v:0", "-map", "1:a:0"]
 
         cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+        cmd += subtitles.map_args(subs)
 
-        if fit == "video":
-            if mode == "replace" and a_dur and v_dur and a_dur < v_dur - 0.2:
-                cmd += ["-af", "apad"]
-            cmd += ["-t", f"{v_dur:.3f}"]
-        else:
-            cmd += ["-shortest"]
+        # 时长用 -t 显式给，不要用 -shortest：字幕轨的事件时长常常是 0，
+        # -shortest 会按「最短的流」把画面和声音一起截掉，输出只剩空壳。
+        if fit == "video" and mode == "replace" and a_dur and v_dur \
+                and a_dur < v_dur - 0.2:
+            cmd += ["-af", "apad"]
+        if target_dur > 0:
+            cmd += ["-t", f"{target_dur:.3f}"]
         cmd += ["-movflags", "+faststart", str(out)]
 
         def _cb(frac):

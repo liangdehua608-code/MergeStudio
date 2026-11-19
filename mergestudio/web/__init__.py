@@ -4,17 +4,16 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .. import config as C
-from .. import encoders
+from .. import encoders, notify
 from ..config import pick_exe_dialog, pick_file_dialog, pick_folder_dialog
 from ..media import (compute_output_path, detect_crop, extract_frame,
-                     list_video_files, probe_chapters, probe_full,
-                     reveal_path, scan_folder)
+                     list_video_files, output_family, probe_chapters,
+                     probe_full, reveal_path, scan_folder)
 from ..queue import QUEUE
 
 _SHUTDOWN = {"fn": None}
@@ -101,6 +100,7 @@ class Handler(BaseHTTPRequestHandler):
                         "fps": info.get("fps"), "vcodec": info.get("vcodec"),
                         "acodec": info.get("acodec"),
                         "sample_rate": info.get("sample_rate"),
+                        "subtitles": len(info.get("subtitles") or []),
                         "chapters": len(probe_chapters(f))})
         elif path == "/api/thumb":
             qs = parse_qs(parsed.query)
@@ -125,7 +125,12 @@ class Handler(BaseHTTPRequestHandler):
             st = C.config_status()
             self._json({"ffmpeg_input": cfg.get("ffmpeg", ""),
                         "ffprobe_input": cfg.get("ffprobe", ""),
+                        "on_exists": cfg.get("on_exists", "rename"),
+                        "notify": cfg.get("notify", {}),
+                        "notify_status": notify.status(),
                         "encoders": encoders.status(), **st})
+        elif path == "/api/notify":
+            self._json(notify.status())
         elif path == "/api/ping":
             self._json({"app": C.APP_ID, "version": C.APP_VERSION,
                         "pid": os.getpid()})
@@ -151,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
     def _clean_params(body: dict) -> dict:
         keys = ("op", "folder", "recursive", "output", "mode", "encoder",
                 "parallel", "crf", "preset", "size", "fps", "trim_head",
-                "trim_tail", "chapters", "file_order", "crop",
+                "trim_tail", "chapters", "file_order", "crop", "overwrite",
                 "audio_format", "audio_quality", "on_error",
                 "target", "segments", "precise",
                 "video", "audio", "volume", "fit")
@@ -165,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 new_cfg = {"ffmpeg": str(body.get("ffmpeg", "") or "").strip(),
                            "ffprobe": str(body.get("ffprobe", "") or "").strip()}
+                prev = C.load_config()
+                new_cfg["on_exists"] = prev["on_exists"]
+                new_cfg["notify"] = prev["notify"]
                 C.apply_config(new_cfg)
                 st = C.config_status()
                 if not st["ready"]:
@@ -181,6 +189,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "ffmpeg_input": new_cfg["ffmpeg"],
                             "ffprobe_input": new_cfg["ffprobe"],
                             "encoders": encoders.status(), **st})
+
+            elif path == "/api/settings":
+                # 只改行为开关（同名输出 / 通知 / 托盘），不碰 ffmpeg 路径，
+                # 所以不在这里做 ffmpeg 校验——没配 ffmpeg 也该能先设置提醒。
+                cfg = C.load_config()
+                mode = str(body.get("on_exists") or cfg["on_exists"]).lower()
+                cfg["on_exists"] = mode if mode in ("rename", "overwrite") else "rename"
+                n = body.get("notify")
+                if isinstance(n, dict):
+                    cfg["notify"] = {
+                        "enabled": bool(n.get("enabled", cfg["notify"]["enabled"])),
+                        "tray": bool(n.get("tray", cfg["notify"]["tray"])),
+                    }
+                C.apply_config(cfg)
+                C.save_config(cfg)
+                ns = notify.configure(cfg["notify"])
+                self._json({"ok": True, "on_exists": cfg["on_exists"],
+                            "notify": cfg["notify"], "notify_status": ns})
+
+            elif path == "/api/notify/test":
+                sent = notify.notify(f"{C.APP_NAME} 通知测试",
+                                     "看到这条说明完成通知已经通了 ✅")
+                self._json({"ok": True, "sent": bool(sent), **notify.status()})
 
             elif path == "/api/encoders/test":
                 self._json({"ok": True, "encoders": encoders.status(force=True)})
@@ -231,7 +262,9 @@ class Handler(BaseHTTPRequestHandler):
                     target = compute_output_path(folder, out_dir)
                 except Exception:
                     target = None
-                self._json(scan_folder(folder, recursive, exclude_path=target))
+                # 预览扫描同样排除自己的历史输出，避免把上次成品算进素材
+                family = output_family(target) if target else []
+                self._json(scan_folder(folder, recursive, exclude_paths=family))
 
             elif path == "/api/split/plan":
                 raw = str(body.get("path") or "").strip()

@@ -20,6 +20,7 @@ import urllib.request
 import webbrowser
 
 from . import config as C
+from . import notify
 from .queue import QUEUE
 from .runtime import (clear_runtime, pid_alive, probe_instance,
                       read_runtime, write_runtime)
@@ -122,7 +123,7 @@ def main() -> int:
         print("  ⚠️  ffmpeg / ffprobe 尚未就绪。")
         print("     启动后请在网页「设置」页填写 → 验证并保存。")
     print("=" * 66)
-    print("  功能：任务队列 · 合并/裁剪/章节 · 提取音频 · 合并后自检")
+    print("  功能：任务队列（重启不丢）· 合并/裁剪/章节 · 字幕保留 · 完成通知")
     print("=" * 66)
 
     if args.port is None:
@@ -149,6 +150,7 @@ def main() -> int:
     url = f"http://{args.host}:{port}/"
     write_runtime(port, url)
     atexit.register(clear_runtime)
+    atexit.register(notify.stop)
 
     def _shutdown():
         try:
@@ -161,6 +163,8 @@ def main() -> int:
                     time.sleep(0.2)
         except Exception:
             pass
+        notify.stop()
+        QUEUE.shutdown(wait=2.0)      # 停 worker 并把队列写盘，重启后接着跑
         time.sleep(0.3)
         try:
             server.shutdown()
@@ -168,6 +172,16 @@ def main() -> int:
             pass
 
     set_shutdown_hook(_shutdown)
+
+    # 托盘菜单与通知：地址要给，否则托盘点「打开界面」不知道去哪
+    notify.setup(url, {
+        "open": lambda: webbrowser.open(url),
+        "pause": lambda: QUEUE.set_paused(not QUEUE.paused),
+        "is_paused": lambda: QUEUE.paused,
+        "quit": _shutdown,
+    })
+    notify.configure(C.load_config().get("notify") or {})
+    QUEUE.start()                     # 恢复上次没跑完/没跑到的任务
 
     print(f"\n🌐 服务已启动： {url}")
     print("   浏览器会自动打开；关闭本窗口或按 Ctrl+C 停止服务")
@@ -181,6 +195,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n正在退出…")
     finally:
+        notify.stop()
+        QUEUE.shutdown(wait=2.0)
         server.server_close()
         clear_runtime()
         print("已退出。")

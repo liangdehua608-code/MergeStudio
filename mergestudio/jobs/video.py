@@ -4,8 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import config as C
-from .. import encoders
-from ..media import probe_full, trim_span
+from .. import encoders, subtitles
+from ..media import guard_output, probe_full, trim_span
 from ..task import JOB
 from .merge import encode_one
 
@@ -77,15 +77,22 @@ def video_run(params: dict):
             out.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             raise RuntimeError(f"无法创建输出目录：{e}")
-        if out.resolve() == src.resolve():
-            raise RuntimeError("输出文件不能与源文件相同，请换一个输出目录")
+        # 覆盖保护：既不让输出撞上源文件，也不悄悄覆盖旧结果
+        out, out_note = guard_output(out, [src],
+                                     overwrite=C.overwrite_allowed(params))
+        if out_note:
+            JOB.log("🛡 " + out_note)
+
+        subs = subtitles.plan([info.get("subtitle_codecs") or []], out.suffix)
+        if subs.get("note"):
+            JOB.log("🔤 " + subs["note"])
 
         target_w = width if (not crop_on or scale_back) else cw
         target_h = height if (not crop_on or scale_back) else ch
         fps = str(info.get("fps") or "30/1")
 
-        JOB.update(output=str(out), total_files=1, done_files=0,
-                   source_duration=eff_dur,
+        JOB.update(output=str(out), output_note=out_note, total_files=1,
+                   done_files=0, source_duration=eff_dur,
                    state="encoding", message="正在处理…")
         JOB.log(f"🎬 {src.name}")
         JOB.log(f"   源 {width}x{height} · {duration:.1f}s · {fps}")
@@ -105,7 +112,8 @@ def video_run(params: dict):
                    duration, _cb, lambda: JOB.cancel,
                    target_sr=str(info.get("sample_rate") or "48000"),
                    trim=(head, tail),
-                   crop=(left, top, right, bottom) if crop_on else None)
+                   crop=(left, top, right, bottom) if crop_on else None,
+                   keep_subs=subs["keep"])
 
         if not out.exists() or out.stat().st_size == 0:
             raise RuntimeError("处理结束但没有生成输出文件")
@@ -123,6 +131,7 @@ def video_run(params: dict):
                   "height": new_info.get("height"),
                   "crop": {"left": left, "top": top, "right": right,
                            "bottom": bottom, "scale_back": scale_back},
+                  "subtitles": len(new_info.get("subtitles") or []),
                   "level": level,
                   "notes": [] if level == "ok" else [f"时长偏差 {delta:+.2f}s"]}
 

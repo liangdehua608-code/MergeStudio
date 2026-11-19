@@ -3,16 +3,19 @@
     python -m unittest tests.test_smoke -v
 
 没有配置 ffmpeg 时会自动跳过。测试用 ffmpeg 现场生成测试片，不依赖真实素材。
+纯逻辑部分（覆盖保护、字幕策略、队列落盘）不需要 ffmpeg，始终会跑。
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from mergestudio import config as C
-from mergestudio import encoders
+from mergestudio import encoders, subtitles
 from mergestudio.jobs import merge as merge_mod
 from mergestudio.jobs.audio import audio_run
 from mergestudio.jobs.merge import job_run
@@ -20,8 +23,10 @@ from mergestudio.jobs.mux import mux_run
 from mergestudio.jobs.split import split_run
 from mergestudio.jobs.video import video_run
 from mergestudio.task import Task, _TLS
-from mergestudio.media import (detect_crop, extract_frame, probe_chapters,
-                               probe_full, probe_media, reveal_path)
+from mergestudio.media import (detect_crop, extract_frame, guard_output,
+                               output_family, probe_chapters, probe_full,
+                               probe_media, probe_output_summary, reveal_path,
+                               unique_path)
 
 READY = False
 
@@ -32,16 +37,24 @@ def setUpModule():
     READY = bool(C.config_status().get("ready"))
 
 
-def _make_clip(path: Path, seconds: int = 2, letterbox: bool = False):
+def _make_clip(path: Path, seconds: int = 2, letterbox: bool = False,
+               subtitle: bool = False):
     """生成一段带黑条台标的测试视频（纯色图案，体积很小）。"""
     size = "640x300" if letterbox else "640x360"
     vf = "pad=640:360:0:60:black" if letterbox else \
          "drawbox=x=0:y=0:w=iw:h=60:color=black@0.9:t=fill"
     cmd = [C.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
            "-f", "lavfi", "-i", f"testsrc=size={size}:rate=25:duration={seconds}",
-           "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-           "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast",
-           "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path)]
+           "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}"]
+    extra = []
+    if subtitle:
+        srt = path.with_suffix(".srt")
+        srt.write_text("1\n00:00:00,000 --> 00:00:10,000\n测试字幕\n",
+                       encoding="utf-8")
+        cmd += ["-i", str(srt)]
+        extra = ["-c:s", "mov_text"]
+    cmd += ["-vf", vf, "-c:v", "libx264", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"] + extra + [str(path)]
     subprocess.run(cmd, check=True)
 
 
@@ -95,9 +108,6 @@ class SmokeTest(unittest.TestCase):
         self.assertTrue(files, "没有生成 m4a")
         self.assertGreater(files[0].stat().st_size, 0)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 class ResilienceTest(unittest.TestCase):
     """失败处理：跳过失败集、断点续跑。用 monkeypatch 制造失败，避免依赖坏文件。"""
@@ -153,7 +163,8 @@ class ResilienceTest(unittest.TestCase):
     def test_skip_failed_segment(self):
         task = self._with_failing_p2(
             lambda: self._run(self._params(on_error="skip")))
-        self.assertEqual(task.state, "done")
+        self.assertEqual(task.state, "done",
+                         f"{task.error}\n" + "\n".join(task.logs[-12:]))
         skipped = (task.report or {}).get("skipped") or []
         self.assertEqual([s["name"] for s in skipped], ["p2.mp4"])
         self.assertTrue(Path(task.output).exists())
@@ -345,17 +356,159 @@ class AudioSingleAndMuxTest(unittest.TestCase):
 
     def test_reveal_command_uses_select_quotes(self):
         calls = []
-        orig = merge_mod.__dict__.get("subprocess")
+
         class Fake:
             def __init__(self, cmd, *a, **kw):
                 calls.append(cmd)
-        import mergestudio.media as media_mod
-        old_popen = media_mod.subprocess.Popen
-        media_mod.subprocess.Popen = Fake
+
+        old_popen = subprocess.Popen
+        subprocess.Popen = Fake
         try:
             reveal_path(self.video)
         finally:
-            media_mod.subprocess.Popen = old_popen
+            subprocess.Popen = old_popen
         self.assertTrue(calls and calls[0].startswith('explorer /select,"'),
                         f"定位命令不对：{calls}")
 
+
+
+class OutputGuardTest(unittest.TestCase):
+    """覆盖保护：不覆盖已有内容，也绝不把输出写到源文件上。"""
+
+    def test_unique_path_never_reuses_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "a_merged.mp4"
+            base.write_bytes(b"x")
+            (Path(d) / "a_merged_2.mp4").write_bytes(b"x")
+            self.assertEqual(unique_path(base).name, "a_merged_3.mp4")
+
+    def test_existing_output_is_renamed(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "a_merged.mp4"
+            out.write_bytes(b"old")
+            final, note = guard_output(out, sources=[])
+            self.assertEqual(final.name, "a_merged_2.mp4")
+            self.assertIn("改名", note)
+            self.assertEqual(out.read_bytes(), b"old", "旧文件不能被改动")
+
+    def test_overwrite_switch(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "a.mp4"
+            out.write_bytes(b"old")
+            final, note = guard_output(out, sources=[], overwrite=True)
+            self.assertEqual(final, out)
+            self.assertIn("覆盖", note)
+
+    def test_output_same_as_source_is_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "a.mp4"
+            src.write_bytes(b"src")
+            with self.assertRaises(RuntimeError):
+                guard_output(src, sources=[src])
+
+    def test_family_covers_previous_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("x_merged.mp4", "x_merged_2.mp4", "x_merged_extra.mp4"):
+                (Path(d) / name).write_bytes(b"x")
+            names = sorted(p.name for p in output_family(Path(d) / "x_merged.mp4"))
+            self.assertEqual(names, ["x_merged.mp4", "x_merged_2.mp4"])
+
+
+class SubtitlePlanTest(unittest.TestCase):
+    """字幕保留策略：三种情况都必须是「宁可丢字幕，不拼坏文件」。"""
+
+    def test_uniform_text_subtitle_kept(self):
+        plan = subtitles.plan([["mov_text"], ["mov_text"]], ".mp4")
+        self.assertTrue(plan["keep"])
+        self.assertEqual(plan["encode"], "mov_text")
+        self.assertIn("-map", subtitles.map_args(plan))
+
+    def test_missing_subtitle_dropped(self):
+        plan = subtitles.plan([["mov_text"], []], ".mp4")
+        self.assertFalse(plan["keep"])
+        self.assertTrue(plan["note"])
+        self.assertEqual(subtitles.map_args(plan), [])
+
+    def test_bitmap_subtitle_dropped(self):
+        plan = subtitles.plan([["hdmv_pgs_subtitle"]], ".mkv")
+        self.assertFalse(plan["keep"])
+        self.assertIn("位图", plan["note"])
+
+    def test_mkv_keeps_original_codec(self):
+        plan = subtitles.plan([["subrip"], ["subrip"]], ".mkv")
+        self.assertTrue(plan["keep"])
+        self.assertEqual(plan["encode"], "copy")
+
+
+class QueueStateTest(unittest.TestCase):
+    """队列持久化：排队中的任务要能活过重启，跑一半的要退回排队并标记续跑。"""
+
+    def test_restore_after_restart(self):
+        from mergestudio.queue import TaskQueue
+
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / "queue.json"
+            q = TaskQueue(state_file=state)
+            q.add({"op": "merge", "folder": d}, "第一个任务")
+            q.add({"op": "audio", "folder": d}, "第二个任务")
+            q.paused = True
+            # 模拟第二个任务正在跑（进程被杀时就是这个状态）
+            q.tasks[1].state = "running"
+            q.tasks[1].started_at = time.time()
+            q.save()
+            self.assertTrue(state.is_file())
+
+            data = json.loads(state.read_text(encoding="utf-8"))
+            self.assertEqual(len(data["tasks"]), 2)
+            self.assertTrue(data["paused"])
+
+            q2 = TaskQueue(state_file=state)
+            self.assertEqual([t.id for t in q2.tasks], ["T001", "T002"])
+            self.assertTrue(q2.paused, "暂停状态也要恢复")
+            self.assertEqual(q2.tasks[0].state, "queued")
+            self.assertEqual(q2.tasks[1].state, "queued",
+                             "跑一半的任务重启后应重新排队")
+            self.assertTrue(q2.tasks[1].params.get("_resume"),
+                            "重新排队时应带上续跑标记")
+            self.assertEqual(q2.tasks[1].started_at, 0.0)
+
+            # 序号接着往下走，不能和已有 ID 撞车
+            q2.seq = 2
+            self.assertEqual(q2.add({"op": "merge", "folder": d})["id"], "T003")
+
+
+class SubtitleMergeTest(unittest.TestCase):
+    """字幕轨真的能被拼进成品（不只是参数拼对了）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        C.apply_config(C.load_config())
+        if not C.config_status().get("ready"):
+            raise unittest.SkipTest("未配置 ffmpeg / ffprobe，跳过")
+        cls.tmp = tempfile.TemporaryDirectory(prefix="mergestudio-sub-")
+        cls.folder = Path(cls.tmp.name) / "sub"
+        cls.folder.mkdir()
+        for i in (1, 2):
+            _make_clip(cls.folder / f"s{i}.mp4", subtitle=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_merge_keeps_subtitle_track(self):
+        task = Task("TSUB", "sub", {})
+        _TLS.task = task
+        try:
+            job_run({"op": "merge", "folder": str(self.folder), "mode": "auto",
+                     "encoder": "libx264", "parallel": 1, "crf": 32,
+                     "preset": "ultrafast", "chapters": True})
+        finally:
+            _TLS.task = None
+        self.assertEqual(task.state, "done", f"{task.error}\n" + "\n".join(task.logs[-10:]))
+        info = probe_output_summary(Path(task.output))
+        self.assertEqual(info.get("subtitles"), 1, "成品应保留 1 条字幕轨")
+        self.assertEqual((task.report or {}).get("subtitles"), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

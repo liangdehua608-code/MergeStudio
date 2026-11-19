@@ -1,22 +1,38 @@
-"""任务队列：单 worker 串行执行，支持暂停、排序、取消、重试与历史落盘。"""
+"""任务队列：单 worker 串行执行；状态落盘，重启不丢排队任务。
+
+为什么串行：合并/转码是磁盘密集型，两三个 ffmpeg 抢一块盘的吞吐，
+结果往往是「每个都慢一倍」，还不如老老实实排队。
+
+落盘策略：状态变化时（入队/开始/结束/取消/重试/删除/暂停）整体写一次
+`queue.json`。文件只有几十 KB，写一次几毫秒，比「进度每秒存档」简单得多，
+崩溃时最多丢掉一个任务的秒级进度——反正它会被当成「被中断」重新排队。
+"""
 from __future__ import annotations
 
-import json
 import shutil
 import threading
 import time
 from pathlib import Path
 
 from . import config as C
+from . import notify, store
 from .jobs import run_task
 from .media import (compute_output_path, list_video_files, natural_key,
                     work_dir_for)
-from .task import RUNNING_STATES, Task, bind_active
+from .task import FINISHED_STATES, RUNNING_STATES, Task, bind_active
+
+MAX_FINISHED_ROWS = 60      # 落盘时最多保留多少条已结束任务
+
+_IDLE_TASK = Task("--", "空闲", {})
+_IDLE_TASK.state = "idle"
+_IDLE_TASK.message = "就绪"
+_IDLE_TASK.logs = []
+
 
 class TaskQueue:
-    """单 worker 串行队列：同一时刻只跑一个 ffmpeg 任务，避免抢占磁盘与 CPU。"""
+    """单 worker 串行队列：同一时刻只跑一个 ffmpeg 任务。"""
 
-    def __init__(self):
+    def __init__(self, state_file=None, autostart: bool = False):
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
         self.tasks: list[Task] = []
@@ -24,62 +40,88 @@ class TaskQueue:
         self.paused = False
         self.seq = 0
         self._stop = False
-        self._load_history()
-        threading.Thread(target=self._loop, daemon=True, name="merge-queue").start()
+        self._thread = None
+        self.state_file = Path(state_file or C.QUEUE_FILE)
+        self._load()
+        if autostart:
+            self.start()
 
-    # ---------- 历史记录（只保留已结束的任务，重启后仍可查报告） ----------
-    _HISTORY_FIELDS = ("id", "name", "folder", "state", "message", "progress",
-                       "output", "total_files", "done_files", "final_duration",
-                       "final_size", "encoded_count", "copied_count",
-                       "source_duration", "duration_delta", "report", "error",
-                       "created_at", "started_at", "finished_at", "options")
+    # ---------- 生命周期 ----------
+    def start(self) -> None:
+        """显式启动 worker。`--stop` 这类模式不该顺手把排队任务跑起来。"""
+        with self.lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop = False
+            self._thread = threading.Thread(target=self._loop, name="merge-queue",
+                                            daemon=True)
+            self._thread.start()
 
-    def _persist(self):
+    def shutdown(self, wait: float = 8.0) -> None:
+        """停止 worker：不再取新任务，等在跑的任务收尾，最后落盘。"""
+        with self.cond:
+            self._stop = True
+            self.cond.notify_all()
+        end = time.time() + max(0.0, wait)
+        while time.time() < end and self.active_id:
+            time.sleep(0.1)
+        self._persist()
+
+    # ---------- 落盘 ----------
+    def _persist(self) -> None:
         try:
             with self.lock:
-                rows = []
-                for t in self.tasks:
-                    if t.state not in ("done", "error", "canceled"):
-                        continue
-                    snap = t.snapshot()
-                    row = {k: snap.get(k) for k in self._HISTORY_FIELDS}
-                    row["params"] = t.params
-                    rows.append(row)
-                rows = rows[-40:]
-            tmp = C.HISTORY_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
-            tmp.replace(C.HISTORY_FILE)
+                rows = [t.to_row() for t in self.tasks]
+                kept, finished = [], 0
+                for row in reversed(rows):
+                    if row.get("state") in FINISHED_STATES:
+                        finished += 1
+                        if finished > MAX_FINISHED_ROWS:
+                            continue
+                    kept.append(row)
+                kept.reverse()
+                payload = {"v": 2, "app": C.APP_ID, "saved_at": time.time(),
+                           "seq": self.seq, "paused": self.paused,
+                           "tasks": kept}
+            store.write_json(self.state_file, payload)
         except Exception:
             pass
 
-    def _load_history(self):
-        if not C.HISTORY_FILE.is_file():
-            return
-        try:
-            rows = json.loads(C.HISTORY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return
+    def _load(self) -> None:
+        data = store.read_json(self.state_file, None)
+        rows, seq_hint, legacy = [], 0, False
+        if isinstance(data, dict):
+            rows = data.get("tasks") or []
+            self.paused = bool(data.get("paused"))
+            seq_hint = int(data.get("seq") or 0)
+        elif isinstance(data, list):
+            rows, legacy = data, True   # 旧版 history.json：纯列表
+        elif self.state_file == C.QUEUE_FILE:
+            old = store.read_json(C.HISTORY_FILE, None)
+            if isinstance(old, list):
+                rows, legacy = old, True    # 首次升级：把旧历史迁移过来
+        if not isinstance(rows, list):
+            rows = []
+
         max_seq = 0
-        for row in rows if isinstance(rows, list) else []:
+        for row in rows:
             try:
-                tid = str(row.get("id") or "")
-                params = row.get("params") or {}
-                t = Task(tid, str(row.get("name") or "历史任务"), params)
-                for k in ("state", "message", "progress", "output", "total_files",
-                          "done_files", "final_duration", "final_size",
-                          "encoded_count", "copied_count", "source_duration",
-                          "duration_delta", "report", "error", "created_at",
-                          "started_at", "finished_at"):
-                    if k in row:
-                        setattr(t, k, row[k])
-                t.logs = ["（历史记录：来自上次运行，可查看报告或重新排队）"]
-                self.tasks.append(t)
-                if tid.startswith("T") and tid[1:].isdigit():
-                    max_seq = max(max_seq, int(tid[1:]))
+                task = Task.from_row(row)
             except Exception:
                 continue
-        self.seq = max_seq
+            if not task.id:
+                continue
+            self.tasks.append(task)
+            if task.id.startswith("T") and task.id[1:].isdigit():
+                max_seq = max(max_seq, int(task.id[1:]))
+        self.seq = max(max_seq, seq_hint)
+        # 只有「旧格式迁移」才立刻回写；正常启动不回写，避免 --stop 这类短命进程
+        # 去改正在运行那个实例的文件。
+        if legacy:
+            self._persist()
+
+    def save(self) -> None:
+        self._persist()
 
     # ---------- 入队 ----------
     def add(self, params: dict, name: str = "") -> dict:
@@ -93,23 +135,25 @@ class TaskQueue:
                 auto_name = Path(target).stem
             else:
                 auto_name = "任务"
-            tid = f"T{self.seq:03d}"
-            task = Task(tid, name or auto_name, params)
+            task = Task(f"T{self.seq:03d}", name or auto_name, params)
             self.tasks.append(task)
             self.cond.notify_all()
-            return task.snapshot()
+            snapshot = task.snapshot()
+        self._persist()
+        return snapshot
 
     def batch_add(self, parent: str, params: dict) -> dict:
         """父目录下每个「直接包含视频」的子文件夹各建一个任务。"""
         root = Path(parent).expanduser()
         if not root.is_dir():
             raise ValueError(f"文件夹不存在：{root}")
-        added, skipped = [], []
         try:
             subs = sorted([p for p in root.iterdir() if p.is_dir()],
                           key=natural_key)
         except Exception as e:
             raise RuntimeError(f"读取目录失败：{e}")
+
+        added, skipped = [], []
         for sub in subs:
             if sub.name.startswith("."):
                 continue
@@ -160,7 +204,7 @@ class TaskQueue:
             if active:
                 return active.snapshot()
             for t in reversed(self.tasks):
-                if t.state in ("done", "error", "canceled"):
+                if t.state in FINISHED_STATES:
                     return t.snapshot()
             return _IDLE_TASK.snapshot()
 
@@ -184,7 +228,7 @@ class TaskQueue:
 
     @staticmethod
     def _cleanup_work(task) -> None:
-        """删除任务留下的中间分段（在输出目录下的 .merge_work_xxx）。"""
+        """删除任务留下的中间分段（输出目录下的 .merge_work_xxx）。"""
         try:
             out = compute_output_path(task.folder, task.params.get("output") or "")
             if out.suffix == "":
@@ -228,18 +272,17 @@ class TaskQueue:
     def clear(self, scope: str = "done") -> int:
         with self.lock:
             if scope == "all":
-                keep = [t for t in self.tasks if t.id == self.active_id
-                        or t.state == "queued"]
+                keep = [t for t in self.tasks
+                        if t.id == self.active_id or t.state == "queued"]
             else:
                 keep = [t for t in self.tasks
-                        if t.state not in ("done", "error", "canceled")]
+                        if t.state not in FINISHED_STATES]
             gone = [t for t in self.tasks if t not in keep]
-            removed = len(gone)
             self.tasks = keep
             for t in gone:
                 self._cleanup_work(t)
             self._persist()
-            return removed
+            return len(gone)
 
     def move(self, tid: str, direction: str) -> bool:
         with self.lock:
@@ -255,12 +298,14 @@ class TaskQueue:
             if swap < 0 or swap >= len(self.tasks):
                 return False
             self.tasks[idx], self.tasks[swap] = self.tasks[swap], self.tasks[idx]
+            self._persist()
             return True
 
     def set_paused(self, paused: bool):
         with self.lock:
             self.paused = bool(paused)
             self.cond.notify_all()
+            self._persist()
 
     # ---------- worker ----------
     def _loop(self):
@@ -279,7 +324,9 @@ class TaskQueue:
                 self.active_id = task.id
                 task.update(state="running", message="启动中…",
                             started_at=time.time(), finished_at=0.0)
+                self._persist()
             bind_active(task)
+            notify.update_tip(f"MergeStudio · 运行中 {task.name[:36]}")
             try:
                 run_task(task.params)
             except Exception as e:  # job_run 内部已兜底，这里只防万一
@@ -298,6 +345,10 @@ class TaskQueue:
                     bind_active(None)
                     self.cond.notify_all()
                 self._persist()
+                try:
+                    notify.task_finished(task)
+                except Exception:
+                    pass
 
 
 QUEUE = TaskQueue()

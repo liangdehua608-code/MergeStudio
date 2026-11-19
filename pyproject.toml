@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "merge-studio"
-version = "6.3.0"
+version = "6.4.0"
 description = "本地视频合并 / 画面裁剪 / 音频提取工具，内置 Web UI 与任务队列"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "MergeStudio contributors" }]
-keywords = ["ffmpeg", "video", "merge", "crop", "audio", "queue"]
+keywords = ["ffmpeg", "video", "merge", "crop", "audio", "queue", "subtitle"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -25,7 +25,7 @@ dev = ["build"]
 mergestudio = "mergestudio.__main__:main"
 
 [tool.setuptools]
-packages = ["mergestudio", "mergestudio.jobs", "mergestudio.web"]
+packages = ["mergestudio", "mergestudio.media", "mergestudio.jobs", "mergestudio.web"]
 
 [tool.setuptools.package-data]
 "mergestudio.web" = ["index.html", "static/*.js", "static/*.css"]

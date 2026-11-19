@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import config as C
-from ..media import list_video_files, probe_full, run_ffmpeg
+from ..media import guard_output, list_video_files, probe_full, run_ffmpeg
 from ..task import JOB
 
 AUDIO_FORMATS = {"m4a": "m4a", "mp3": "mp3"}
@@ -62,6 +62,7 @@ def audio_run(params: dict):
         total_dur = 0.0
         out_size = 0
         first_out = ""
+        overwrite = C.overwrite_allowed(params)
 
         for idx, (src, info) in enumerate(zip(files, infos)):
             if JOB.cancel:
@@ -75,7 +76,10 @@ def audio_run(params: dict):
 
             dur = float(info.get("duration") or 0)
             total_dur += dur
-            dst = _target_path(src, out_dir, fmt)
+            dst, note = guard_output(_target_path(src, out_dir, fmt),
+                                     sources=[src], overwrite=overwrite)
+            if note:
+                JOB.log(f"  🛡 {note}")
             JOB.update(state="encoding", current_file=src.name,
                        message=f"提取音频 {done + 1}/{total}")
             JOB.log(f"  [{done + 1}/{total}] {src.name[:46]}")

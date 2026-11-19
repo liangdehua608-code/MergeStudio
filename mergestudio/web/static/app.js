@@ -210,6 +210,45 @@ function renderConfig(cfg) {
   $("#cfg-ff-ver").textContent = (cfg.ffmpeg_version || "—").slice(0, 80);
   $("#cfg-fp-ver").textContent = (cfg.ffprobe_version || "—").slice(0, 80);
   $("#cfg-file").textContent = "保存于 " + (cfg.config_file || "—");
+
+  // 运行与提醒
+  $("#s-on-exists").value = cfg.on_exists || "rename";
+  const n = cfg.notify || {};
+  $("#s-notify").checked = n.enabled !== false;
+  $("#s-tray").checked = n.tray !== false;
+  renderNotifyState(cfg.notify_status || {});
+}
+
+function renderNotifyState(st) {
+  const pill = $("#run-pill"), hint = $("#notify-hint");
+  if (!pill) return;
+  const on = !!st.enabled;
+  const tray = !!st.tray;
+  pill.className = "pill " + (on ? (tray ? "done" : "queued") : "queued");
+  pill.textContent = !on ? "通知已关闭"
+    : tray ? "通知 · 托盘在线"
+    : st.platform === false ? "通知（无托盘）" : "通知已开 · 托盘不可用";
+  if (st.platform === false) {
+    hint.textContent = "当前系统没有托盘支持，任务完成时会尝试系统通知；不影响任务执行。";
+  } else if (st.error) {
+    hint.textContent = st.error + " —— 任务本身不受影响，只是不弹提示。";
+  } else {
+    hint.textContent = "托盘右键可暂停队列 / 打开界面 / 退出；关掉浏览器也不影响任务继续跑。";
+  }
+}
+
+async function saveRuntimeSettings() {
+  try {
+    const r = await api("/api/settings", {
+      on_exists: $("#s-on-exists").value,
+      notify: { enabled: $("#s-notify").checked, tray: $("#s-tray").checked },
+    });
+    if (S.cfg) Object.assign(S.cfg, { on_exists: r.on_exists, notify: r.notify });
+    renderNotifyState(r.notify_status || {});
+    toast("设置已保存", "ok");
+  } catch (e) {
+    toast("保存失败：" + e.message, "bad");
+  }
 }
 
 /* ================================================================
@@ -630,7 +669,7 @@ function outputPreview() {
 function collectParams() {
   readTrim();
   const mode = (document.querySelector('input[name="mode"]:checked') || {}).value || "auto";
-  return {
+  const params = {
     op: "merge",
     crop: readCrop(),
     folder: $("#f-folder").value.trim(),
@@ -649,6 +688,10 @@ function collectParams() {
     on_error: $("#f-on-error").value,
     file_order: S.fileOrder.slice(),
   };
+  // 留空 = 跟随设置页的同名输出策略，别把默认值硬塞给后端
+  const ow = $("#f-overwrite").value;
+  if (ow) params.overwrite = ow === "overwrite";
+  return params;
 }
 
 async function doScan() {
@@ -769,7 +812,11 @@ async function loadDetail(id) {
   bits.push("</div></div>");
 
   if (t.output) {
-    bits.push('<div class="d-sec"><h4>输出文件</h4><div class="mono" style="background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px 12px;word-break:break-all;color:#3b4250">' + esc(t.output) + "</div></div>");
+    bits.push('<div class="d-sec"><h4>输出文件</h4><div class="mono" style="background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px 12px;word-break:break-all;color:#3b4250">' + esc(t.output) + "</div>");
+    if (t.output_note) {
+      bits.push('<div class="rep-note warn" style="margin-top:8px">🛡 ' + esc(t.output_note) + "</div>");
+    }
+    bits.push("</div>");
   }
 
   bits.push('<div class="d-sec"><h4>任务参数</h4><div class="d-opts">');
@@ -811,6 +858,8 @@ async function loadDetail(id) {
     bits.push(chip("片尾 -" + (opts.trim_tail || 0) + "s"));
     bits.push(chip(opts.chapters ? "写章节" : "不写章节"));
     bits.push(chip(opts.on_error === "skip" ? "失败集跳过" : "失败即中止"));
+    if (rep.subtitles) bits.push(chip("字幕 " + rep.subtitles + " 条"));
+    if (opts.overwrite) bits.push(chip("允许覆盖同名输出"));
     if (opts.recursive) bits.push(chip("含子文件夹"));
   }
   bits.push("</div></div>");
@@ -1217,6 +1266,27 @@ function bindEvents() {
     };
     try { localStorage.setItem("v5.defaults", JSON.stringify(d)); } catch (e) {}
     toast("默认参数已保存", "ok");
+  };
+
+  // 运行与提醒：改一个存一个，不用再点保存
+  ["#s-on-exists", "#s-notify", "#s-tray"].forEach(sel => {
+    const el = $(sel);
+    if (el) el.addEventListener("change", saveRuntimeSettings);
+  });
+  const nt = $("#btn-notify-test");
+  if (nt) nt.onclick = async () => {
+    const old = nt.textContent;
+    nt.disabled = true; nt.textContent = "发送中…";
+    try {
+      const r = await api("/api/notify/test", {});
+      renderNotifyState(r);
+      toast(r.sent ? "已发送，留意系统通知" : "没发出去：检查通知开关与托盘状态",
+            r.sent ? "ok" : "bad");
+    } catch (e) {
+      toast("测试失败：" + e.message, "bad");
+    } finally {
+      nt.disabled = false; nt.textContent = old;
+    }
   };
 }
 

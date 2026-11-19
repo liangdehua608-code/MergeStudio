@@ -10,7 +10,8 @@ import re
 from pathlib import Path
 
 from .. import config as C
-from ..media import run_ffmpeg, trim_span
+from .. import subtitles
+from ..media import guard_output, run_ffmpeg
 from ..task import JOB
 
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -56,6 +57,13 @@ def split_run(params: dict):
                 f"{'精确切割（重编码）' if precise else '流复制（切点对齐关键帧）'}")
         JOB.log(f"   输出目录：{out_dir}")
 
+        # 字幕：单文件切割只要有一条文本字幕就能带过去
+        subs = subtitles.plan([subtitles.probe(src)], ".mp4")
+        if not subs["keep"] and subs["note"]:
+            JOB.log("🔤 " + subs["note"])
+        subs_args = subtitles.map_args(subs)
+        overwrite = C.overwrite_allowed(params)
+
         done = 0
         ok = 0
         total_out = 0.0
@@ -82,7 +90,10 @@ def split_run(params: dict):
             name = f"{src.stem}_P{idx + 1:02d}"
             if title:
                 name += f"_{title}"
-            dst = out_dir / (name + ".mp4")
+            dst, note = guard_output(out_dir / (name + ".mp4"),
+                                     sources=[src], overwrite=overwrite)
+            if note:
+                JOB.log(f"  🛡 {note}")
 
             JOB.update(current_file=dst.name,
                        message=f"切割 {idx + 1}/{total}",
@@ -98,6 +109,7 @@ def split_run(params: dict):
                         "-c:a", "aac", "-b:a", "192k"]
             else:
                 cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+            cmd += subs_args
             cmd += ["-movflags", "+faststart", str(dst)]
 
             def _cb(frac, i=idx):
