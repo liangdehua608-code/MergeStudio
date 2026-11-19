@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 APP_NAME = "视频拼接工坊"
-APP_VERSION = "6.1.0"
+APP_VERSION = "6.2.0"
 APP_ID = "merge-studio"
 DEFAULT_PORT = 8760
 
@@ -121,8 +121,7 @@ def config_status() -> dict:
             "ffmpeg_ok": ff_ok, "ffprobe_ok": fp_ok,
             "ffmpeg_version": ff_msg, "ffprobe_version": fp_msg,
             "ready": ff_ok and fp_ok,
-            "config_file": str(CONFIG_FILE),
-            "encoders": ENCODERS}
+            "config_file": str(CONFIG_FILE)}
 
 def pick_exe_dialog(title: str):
     with TK_LOCK:

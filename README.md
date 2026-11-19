@@ -3,7 +3,8 @@
 把一整个文件夹的网课视频按顺序拼成一条长视频，顺带解决时长错乱、音视频不同步、
 台标遮挡等问题。所有处理都在本机完成，文件不上传。
 
-> v6 把原来的单文件脚本重构成可维护的 Python 包，并新增「画面裁剪」与「提取音频」。
+> v6 把原来的单文件脚本重构成可维护的 Python 包，并陆续加入画面裁剪、提取音频、
+> 视频切割与「单个视频」处理。
 
 ![任务队列](docs/screenshots/queue.png)
 
@@ -19,10 +20,14 @@
 - **断点续跑**：失败或取消后保留已完成分段，任务详情里可一键从断点继续
 - 单个分段偶发失败时底层自动重试 2 次（磁盘满、坏文件不重试）
 
-**画面裁剪（v6 新增）**
-- 去掉画面顶部的台标、四周黑边，直接在预览帧上框出保留区域
+**单个视频（v6.2 新增）**
+- 只处理一个视频：裁掉水印 / 台标 / 黑边，或剪掉片头片尾，输出为新文件，不动源文件
+- 真实抽帧预览 + 斜纹标出要裁掉的部分，四边像素可精确到 1px
+- 「自动检测黑边」用逐行/逐列亮度统计（抗噪点、抗台标），cropdetect 兜底
+
+**画面裁剪（合并任务里）**
+- 整套素材统一裁掉顶部台标或四周黑边，和合并一次完成
 - 预设「去顶部 60 / 80 px」「上下各 40 px」，也可手填四边像素
-- 自动检测黑边（cropdetect），台标建议用预设
 - 可选「裁完缩放回原分辨率」，默认保留裁剪后的尺寸（不拉伸）
 
 **提取音频**
@@ -42,13 +47,13 @@
 
 ## 截图
 
-| 新建任务 · 预检 + 画面裁剪 | 提取音频 |
+| 单个视频 · 去水印 / 裁剪 | 合并任务 · 预检 + 批量裁剪 |
 | --- | --- |
-| ![裁剪](docs/screenshots/crop.png) | ![音频](docs/screenshots/audio.png) |
+| ![单视频](docs/screenshots/single.png) | ![裁剪](docs/screenshots/crop.png) |
 
-按章节切割，逐段勾选要导出的内容：
-
-![切割](docs/screenshots/split.png)
+| 提取音频 | 按章节切割 |
+| --- | --- |
+| ![音频](docs/screenshots/audio.png) | ![切割](docs/screenshots/split.png) |
 
 ## 环境要求
 
@@ -56,6 +61,9 @@
 - ffmpeg / ffprobe（需自行安装，建议 5.0+；需要 libx264，字幕烧录另需 libass）
   - Windows 可用 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 的 full build
   - 也可以在网页「设置」里填 ffmpeg.exe / bin 目录，留空则自动从 PATH 查找
+- 硬件编码器可选：程序启动后会自动探测本机可用性，不可用的会直接禁用并说明原因
+  - NVENC 需要 NVIDIA 显卡，QSV 需要 Intel 核显，AMF 需要 AMD 显卡
+  - 不同编码器的 `-preset`/质量参数由程序自动换算，不会出现换了编码器就报错
 
 ## 快速开始
 
@@ -84,6 +92,7 @@ MergeStudio/
 ├── mergestudio/
 │   ├── __main__.py      # 命令行入口、单实例、优雅退出
 │   ├── config.py        # 路径、ffmpeg 解析与配置读写
+│   ├── encoders.py      # 编码器能力表、可用性探测、参数换算
 │   ├── media.py         # ffprobe 探测、扫描分组、ffmpeg 执行、抽帧、cropdetect
 │   ├── task.py          # 任务对象与 JOB 代理
 │   ├── queue.py         # 串行队列、历史落盘
@@ -91,7 +100,8 @@ MergeStudio/
 │   ├── jobs/
 │   │   ├── merge.py     # 合并 / 裁剪 / 章节 / 自检 / 续跑
 │   │   ├── audio.py     # 提取音频
-│   │   └── split.py     # 按章节或时长切割
+│   │   ├── split.py     # 按章节或时长切割
+│   │   └── video.py     # 单个视频：裁剪 / 剪头尾
 │   └── web/
 │       ├── __init__.py  # HTTP 服务与 JSON API
 │       ├── index.html
@@ -122,7 +132,9 @@ MergeStudio/
 | GET | `/api/config` | ffmpeg 状态 |
 | POST | `/api/config` | 验证并保存路径 |
 | POST | `/api/scan` | 扫描文件夹并预检 |
-| POST | `/api/detect-crop` | cropdetect 自动检测黑边 |
+| GET | `/api/probe?path=` | 读取单个视频的分辨率/时长/音轨 |
+| POST | `/api/detect-crop` | 自动检测黑边（亮度分析 + cropdetect） |
+| POST | `/api/encoders/test` | 重新探测本机编码器 |
 | POST | `/api/split/plan` | 按章节/时长生成切割方案 |
 | POST | `/api/pick-video` | 选择单个视频文件 |
 | GET | `/api/thumb?path=&t=` | 抽取一帧 JPEG 用于裁剪预览 |
@@ -149,6 +161,11 @@ python -m unittest tests.test_smoke -v
 **裁剪后为什么变慢了？**
 裁剪无法流复制，必须重编码，因此启用裁剪会强制该任务「全部转码」。
 如果只是去掉片头片尾，用「片头/片尾裁剪」即可保持无损。
+
+**切换硬件编码器会不会报错？**
+不会。程序在任务开始前会跑一段 1 秒测试编码来确认编码器可用，
+不可用的选项在界面上直接禁用并写明原因；`-preset`/质量参数会按编码器自动换算。
+注意 NVENC 在消费级显卡上有并发上限，队列会自动把并行数收敛到 3。
 
 **失败后输出目录多了 `.merge_work_xxx` 文件夹？**
 那是断点续跑保留的已完成分段，不是垃圾文件。点任务详情里的「断点续跑」会复用它、

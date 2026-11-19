@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "merge-studio"
-version = "6.1.0"
+version = "6.2.0"
 description = "本地视频合并 / 画面裁剪 / 音频提取工具，内置 Web UI 与任务队列"
 readme = "README.md"
 requires-python = ">=3.9"

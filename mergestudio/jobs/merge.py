@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .. import config as C
+from .. import encoders
 from ..media import (
     build_chapter_meta,
     build_chapters,
@@ -366,8 +367,7 @@ def encode_one(src: Path, dst: Path, w: int, h: int, fps: str,
     v3.2: 视频 timescale 跟随全局统一目标 target_ts，避免与 copy 段冲突
     v4:   trim=(head, tail) 时做帧级精确裁剪（转码天然精确）
     v6:   crop=(left, top, right, bottom) 时先按源画面裁掉边框，再缩放到目标尺寸"""
-    enc_info = C.ENCODERS.get(encoder, C.ENCODERS["libx264"])
-    codec = enc_info["codec"]
+    vargs = encoders.video_args(encoder, preset, crf)
 
     head, tail = (trim or (0.0, 0.0))[:2]
     eff = trim_span(duration, float(head or 0), float(tail or 0)) if duration else 0.0
@@ -394,18 +394,8 @@ def encode_one(src: Path, dst: Path, w: int, h: int, fps: str,
         cmd += ["-f", "lavfi", "-i", f"anullsrc=r={target_sr}:cl=stereo",
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
 
-    cmd += ["-vf", vf, "-c:v", codec]
-
-    # 不同编码器质量参数适配
-    if enc_info["hw"]:
-        if encoder == "h264_nvenc":
-            cmd += ["-preset", preset, "-cq", str(crf)]
-        elif encoder == "h264_qsv":
-            cmd += ["-preset", preset, "-global_quality", str(crf)]
-        else:
-            cmd += ["-preset", preset, "-crf", str(crf)]
-    else:
-        cmd += ["-preset", preset, "-crf", str(crf)]
+    cmd += ["-vf", vf]
+    cmd += vargs
 
     # v3.1: -ar 跟随统一采样率，避免与其它分段不一致
     cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", str(target_sr), "-ac", "2"]
@@ -592,6 +582,19 @@ def job_run(params: dict):
         crop_r = max(0, int(crop_cfg.get("right", 0) or 0))
         crop_b = max(0, int(crop_cfg.get("bottom", 0) or 0))
         crop_scale_back = bool(crop_cfg.get("scale_back"))
+
+        # 编码器可用性检查：不可用就直接报人话，不要跑到一半才失败
+        if mode != "copy":
+            _st = encoders.ensure(encoder)
+            if not _st.get("ok"):
+                raise RuntimeError(
+                    f"编码器 {encoder} 不可用：{_st.get('reason') or '未知原因'}。"
+                    f"请在「设置」页改用 libx264（CPU）后重试。")
+            _lim = encoders.max_parallel(encoder)
+            if _lim and parallel > _lim:
+                JOB.log(f"ℹ️ {encoder} 建议最多 {_lim} 路并发，"
+                        f"已从 {parallel} 调整为 {_lim}")
+                parallel = _lim
         crop_rect = (crop_l, crop_t, crop_r, crop_b) if crop_on else None
         if crop_on and not any(crop_rect):
             crop_on, crop_rect = False, None

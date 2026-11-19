@@ -12,12 +12,14 @@ import unittest
 from pathlib import Path
 
 from mergestudio import config as C
+from mergestudio import encoders
 from mergestudio.jobs import merge as merge_mod
 from mergestudio.jobs.audio import audio_run
 from mergestudio.jobs.merge import job_run
 from mergestudio.jobs.split import split_run
+from mergestudio.jobs.video import video_run
 from mergestudio.task import Task, _TLS
-from mergestudio.media import detect_crop, probe_full
+from mergestudio.media import detect_crop, extract_frame, probe_chapters, probe_full
 
 READY = False
 
@@ -199,4 +201,95 @@ class SplitTest(unittest.TestCase):
         self.assertIn("P01", parts[0].name)
         self.assertEqual(task.state, "done")
         self.assertEqual((task.report or {}).get("count"), 2)
+
+class DetectCropTest(unittest.TestCase):
+    """黑边检测：带台标/噪点/竖边都要能认出来。"""
+
+    @classmethod
+    def setUpClass(cls):
+        C.apply_config(C.load_config())
+        if not C.config_status().get("ready"):
+            raise unittest.SkipTest("未配置 ffmpeg / ffprobe，跳过")
+        cls.tmp = tempfile.TemporaryDirectory(prefix="mergestudio-bars-")
+        cls.logo = Path(cls.tmp.name) / "logo.mp4"
+        _make_clip(cls.logo, letterbox=True)
+        # 在顶部黑边里放一个白色台标
+        subprocess.run([C.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", str(cls.logo), "-vf",
+                        "drawbox=x=20:y=10:w=60:h=30:color=white:t=fill",
+                        "-c:a", "copy", str(cls.logo.with_name("logo2.mp4"))],
+                       check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_letterbox_with_logo(self):
+        info = detect_crop(Path(self.tmp.name) / "logo2.mp4")
+        self.assertTrue(info["ok"])
+        self.assertAlmostEqual(info["top"], 60, delta=6)
+        self.assertAlmostEqual(info["bottom"], 0, delta=6)
+
+    def test_no_bars(self):
+        plain = Path(self.tmp.name) / "plain.mp4"
+        if not plain.exists():
+            subprocess.run([C.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                            "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=2",
+                            "-c:v", "libx264", "-preset", "ultrafast",
+                            "-pix_fmt", "yuv420p", str(plain)], check=True)
+        info = detect_crop(plain)
+        self.assertFalse(info["ok"], f"无黑边不应报裁剪：{info}")
+
+    def test_extract_frame(self):
+        jpg = extract_frame(Path(self.tmp.name) / "logo.mp4", t=1.0)
+        self.assertTrue(jpg.startswith(b"\xff\xd8"), "应返回 JPEG")
+        self.assertGreater(len(jpg), 1000)
+
+
+class EncoderTest(unittest.TestCase):
+    def test_libx264_available(self):
+        C.apply_config(C.load_config())
+        if not C.config_status().get("ready"):
+            raise unittest.SkipTest("未配置 ffmpeg / ffprobe，跳过")
+        st = encoders.status()
+        self.assertTrue(st["libx264"]["ok"])
+        for key, info in st.items():
+            if not info["ok"]:
+                self.assertTrue(info["reason"], f"{key} 不可用时应给出原因")
+
+
+class VideoJobTest(unittest.TestCase):
+    """单个视频裁剪：只处理目标文件，输出新文件并保留音轨。"""
+
+    @classmethod
+    def setUpClass(cls):
+        C.apply_config(C.load_config())
+        if not C.config_status().get("ready"):
+            raise unittest.SkipTest("未配置 ffmpeg / ffprobe，跳过")
+        cls.tmp = tempfile.TemporaryDirectory(prefix="mergestudio-single-")
+        cls.src = Path(cls.tmp.name) / "clip.mp4"
+        _make_clip(cls.src)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_crop_single_video(self):
+        task = Task("TSINGLE", "single", {})
+        _TLS.task = task
+        try:
+            video_run({
+                "op": "video", "target": str(self.src),
+                "output": str(Path(self.tmp.name) / "out"),
+                "crop": {"enabled": True, "top": 60},
+                "trim_head": 0.3, "trim_tail": 0.3,
+                "encoder": "libx264", "crf": 32, "preset": "ultrafast",
+            })
+        finally:
+            _TLS.task = None
+        self.assertEqual(task.state, "done", task.message)
+        info = probe_full(Path(task.output))
+        self.assertEqual(info.get("width"), 640)
+        self.assertEqual(info.get("height"), 300, "应裁掉顶部 60px")
+        self.assertTrue(info.get("acodec"), "应保留音轨")
 

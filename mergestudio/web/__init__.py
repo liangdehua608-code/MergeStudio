@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .. import config as C
+from .. import encoders
 from ..config import pick_exe_dialog, pick_file_dialog, pick_folder_dialog
 from ..media import (compute_output_path, detect_crop, extract_frame,
                      list_video_files, probe_chapters, probe_full,
@@ -86,6 +87,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, f.read_bytes(), MIME[f.suffix.lower()])
             else:
                 self._send(404, "not found", "text/plain")
+        elif path == "/api/probe":
+            qs = parse_qs(parsed.query)
+            raw = (qs.get("path") or [""])[0]
+            f = Path(raw)
+            if not raw or not f.is_file() or f.suffix.lower() not in C.VIDEO_EXTS:
+                self._json({"error": "不是有效的视频文件"}, 400)
+                return
+            info = probe_full(f) or {}
+            self._json({"ok": True, "path": str(f),
+                        "width": info.get("width"), "height": info.get("height"),
+                        "duration": info.get("duration"),
+                        "fps": info.get("fps"), "vcodec": info.get("vcodec"),
+                        "acodec": info.get("acodec"),
+                        "sample_rate": info.get("sample_rate"),
+                        "chapters": len(probe_chapters(f))})
         elif path == "/api/thumb":
             qs = parse_qs(parsed.query)
             raw = (qs.get("path") or [""])[0]
@@ -108,7 +124,8 @@ class Handler(BaseHTTPRequestHandler):
             cfg = C.load_config()
             st = C.config_status()
             self._json({"ffmpeg_input": cfg.get("ffmpeg", ""),
-                        "ffprobe_input": cfg.get("ffprobe", ""), **st})
+                        "ffprobe_input": cfg.get("ffprobe", ""),
+                        "encoders": encoders.status(), **st})
         elif path == "/api/ping":
             self._json({"app": C.APP_ID, "version": C.APP_VERSION,
                         "pid": os.getpid()})
@@ -161,7 +178,11 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 C.save_config(new_cfg)
                 self._json({"ok": True, "ffmpeg_input": new_cfg["ffmpeg"],
-                            "ffprobe_input": new_cfg["ffprobe"], **st})
+                            "ffprobe_input": new_cfg["ffprobe"],
+                            "encoders": encoders.status(), **st})
+
+            elif path == "/api/encoders/test":
+                self._json({"ok": True, "encoders": encoders.status(force=True)})
 
             elif path == "/api/pick-exe":
                 which = str(body.get("which", "ffmpeg"))
@@ -280,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 params = self._clean_params(body)
                 op = str(params.get("op") or "merge").lower()
-                if op == "split":
+                if op in ("split", "video"):
                     target = str(params.get("target") or "").strip()
                     if not target:
                         self._json({"error": "请选择要切割的视频文件"}, 400)
@@ -288,7 +309,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not Path(target).expanduser().is_file():
                         self._json({"error": f"文件不存在：{target}"}, 400)
                         return
-                    if not params.get("segments"):
+                    if op == "split" and not params.get("segments"):
                         self._json({"error": "请先勾选要导出的片段"}, 400)
                         return
                 else:

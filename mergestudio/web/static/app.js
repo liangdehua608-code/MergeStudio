@@ -16,6 +16,8 @@ const S = {
   crop: { enabled: false, left: 0, top: 0, right: 0, bottom: 0, scale_back: false },
   audio: { scan: null },
   split: { plan: null },
+  single: { path: "", width: 0, height: 0, duration: 0 },
+  encoders: {},
   detailId: "",
   view: "queue",
   busy: false,
@@ -124,6 +126,7 @@ const PAGES = {
   new: { title: "新建任务", sub: "选文件夹 → 预检 → 设参数 → 加入队列" },
   audio: { title: "提取音频", sub: "批量导出音轨 · m4a 直拷 / mp3 转码" },
   split: { title: "视频切割", sub: "按章节或固定时长切开 · 勾选要导出的片段" },
+  single: { title: "单个视频", sub: "只处理一个视频 · 去水印 / 去黑边 / 剪片头片尾" },
   settings: { title: "设置", sub: "ffmpeg 引擎与默认参数" },
 };
 
@@ -141,6 +144,7 @@ function setRoute() {
   if (name === "new") { renderScan(); updateBar(); }
   if (name === "audio") renderAudio();
   if (name === "split") renderSplit();
+  if (name === "single") renderSingle();
   if (name === "settings") loadConfig();
 }
 
@@ -153,7 +157,7 @@ function renderTopActions() {
       : running ? '<span class="pill brand">运行中 ' + running + "</span>"
       : '<span class="pill queued">队列空闲</span>';
     box.innerHTML = '<span class="pill queued">排队 ' + (c.queued || 0) + "</span>" + status;
-  } else if (S.view === "new" || S.view === "audio" || S.view === "split") {
+  } else if (S.view === "new" || S.view === "audio" || S.view === "split" || S.view === "single") {
     box.innerHTML = '<a class="btn sm" href="#/queue">← 返回队列</a>';
   } else {
     box.innerHTML = "";
@@ -165,6 +169,7 @@ async function loadConfig() {
   try {
     const cfg = await api("/api/config");
     S.cfg = cfg;
+    renderEncoders(cfg.encoders || {});
     if (S.view === "settings") renderConfig(cfg);
     renderEngine(cfg);
   } catch (e) {
@@ -267,6 +272,10 @@ function renderActive() {
     ? [(t.total_files || 0) + " 段",
        opts.precise ? "精确切割（重编码）" : "流复制",
        "可随时取消"]
+    : opts.op === "video"
+    ? ["单个视频",
+       (opts.crop && opts.crop.enabled) ? "画面裁剪" : "无裁剪",
+       "输出为新文件"]
     : [(t.total_files || 0) + " 个文件",
        MODE_TEXT[opts.mode] || opts.mode,
        trim > 0 ? "裁剪 " + trim + "s/集" : "不裁剪",
@@ -367,7 +376,7 @@ function renderTaskList() {
       '<div style="min-width:0">' +
         '<div class="task-name"><span class="nm" title="' + esc(t.name) + '">' + esc(t.name) + "</span>" +
           '<span class="op-tag ' + (opts.op === "audio" ? "audio" : "") + '">' +
-            ({ merge: "合并", audio: "音频", split: "切割" }[opts.op] || "合并") + "</span>" +
+            ({ merge: "合并", audio: "音频", split: "切割", video: "单视频" }[opts.op] || "合并") + "</span>" +
           '<span class="pill ' + st.cls + '">' + st.text + "</span>" +
           (t.state === "running" || t.state === "scanning" || t.state === "copying" || t.state === "encoding"
             ? '<span class="pill brand num">' + pct + "%</span>" : "") +
@@ -764,6 +773,16 @@ async function loadDetail(id) {
   } else if (opts.op === "split") {
     bits.push(chip(opts.precise ? "精确切割（重编码）" : "流复制（关键帧对齐）"));
     bits.push(chip((t.total_files || 0) + " 段"));
+  } else if (opts.op === "video") {
+    if (opts.crop && opts.crop.enabled) {
+      const cp = opts.crop;
+      bits.push(chip("裁剪 上" + (cp.top || 0) + " 下" + (cp.bottom || 0) +
+                     " 左" + (cp.left || 0) + " 右" + (cp.right || 0)));
+      if (cp.scale_back) bits.push(chip("缩放回原尺寸"));
+    }
+    bits.push(chip("片头 -" + (opts.trim_head || 0) + "s"));
+    bits.push(chip("片尾 -" + (opts.trim_tail || 0) + "s"));
+    bits.push(chip("编码 " + (opts.encoder || "libx264")));
   } else {
     bits.push(chip("模式 " + (MODE_TEXT[opts.mode] || opts.mode)));
     bits.push(chip("编码 " + (opts.encoder || "—")));
@@ -957,10 +976,52 @@ function bindEvents() {
     if (el) el.addEventListener("input", updateCropPreview);
   });
   $$("[data-crop-preset]").forEach(b => {
-    b.onclick = () => applyCropPreset(b.dataset.cropPreset);
+    b.onclick = () => {
+      const ui = b.dataset.scope === "video" ? CROP_VIDEO : CROP_MERGE;
+      applyCropPresetFor(ui, b.dataset.cropPreset);
+    };
   });
   const dc = $("#btn-detect-crop");
   if (dc) dc.onclick = detectCrop;
+
+  // 单个视频
+  $("#v-crop").addEventListener("change", () => updateCropPreviewFor(CROP_VIDEO));
+  ["#v-top", "#v-bottom", "#v-left", "#v-right"].forEach(sel => {
+    $(sel).addEventListener("input", () => updateCropPreviewFor(CROP_VIDEO));
+  });
+  $("#v-scale-back").addEventListener("change", () => updateCropPreviewFor(CROP_VIDEO));
+  $("#v-detect-crop").onclick = () => {
+    if (!S.single.path) return toast("请先选择视频文件", "bad");
+    return detectCropFor(CROP_VIDEO, { path: S.single.path });
+  };
+  $("#v-pick").onclick = async () => {
+    const btn = $("#v-pick");
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const r = await api("/api/pick-video", { title: "选择要处理的视频" });
+      if (r.path) {
+        $("#v-target").value = r.path;
+        S.single = { path: r.path, width: 0, height: 0 };
+        await probeSingle();
+      }
+    } catch (e) { toast("打开失败：" + e.message, "bad"); }
+    finally { btn.disabled = false; btn.textContent = "浏览"; }
+  };
+  $("#v-probe").onclick = probeSingle;
+  $("#v-target").addEventListener("change", probeSingle);
+  $("#v-start").onclick = startSingle;
+  $("#v-trim-head").addEventListener("input", updateSingleSummary);
+  $("#v-trim-tail").addEventListener("input", updateSingleSummary);
+  const te = $("#btn-test-enc");
+  if (te) te.onclick = async () => {
+    te.disabled = true; te.textContent = "检测中…";
+    try {
+      const r = await api("/api/encoders/test", {});
+      renderEncoders(r.encoders || {});
+      toast("编码器检测完成", "ok");
+    } catch (e) { toast("检测失败：" + e.message, "bad"); }
+    finally { te.disabled = false; te.textContent = "重新检测"; }
+  };
 
   // 视频切割
   $("#p-plan").onclick = makeSplitPlan;
@@ -1135,34 +1196,83 @@ function applyDefaults() {
 
 
 /* ================================================================
- * v6：画面裁剪
+ * v6：画面裁剪（合并任务 / 单个视频共用）
  * ================================================================ */
-function readCrop() {
-  return {
-    enabled: $("#f-crop").checked,
-    left: Math.max(0, parseInt($("#crop-left").value, 10) || 0),
-    top: Math.max(0, parseInt($("#crop-top").value, 10) || 0),
-    right: Math.max(0, parseInt($("#crop-right").value, 10) || 0),
-    bottom: Math.max(0, parseInt($("#crop-bottom").value, 10) || 0),
-    scale_back: $("#crop-scale-back").checked,
-  };
+const CROP_MERGE = {
+  name: "merge", root: "#crop-adv", toggle: "#f-crop", body: "#crop-body",
+  top: "#crop-top", bottom: "#crop-bottom", left: "#crop-left",
+  right: "#crop-right", scale: "#crop-scale-back", img: "#crop-img",
+  keep: "#crop-keep", size: "#crop-size",
+  strips: { top: "#strip-top", bottom: "#strip-bottom",
+            left: "#strip-left", right: "#strip-right" },
+};
+const CROP_VIDEO = {
+  name: "video", root: null, toggle: "#v-crop", body: "#v-crop-body",
+  top: "#v-top", bottom: "#v-bottom", left: "#v-left", right: "#v-right",
+  scale: "#v-scale-back", img: "#v-crop-img", keep: "#v-keep",
+  size: "#v-crop-size",
+  strips: { top: "#v-strip-top", bottom: "#v-strip-bottom",
+            left: "#v-strip-left", right: "#v-strip-right" },
+};
+
+function cropDims(ui) {
+  if (ui === CROP_MERGE) {
+    const files = (S.scan && S.scan.files) || [];
+    const f = files.find(x => x.ok) || files[0];
+    return f ? { W: Number(f.width) || 1280, H: Number(f.height) || 720, path: f.path } : null;
+  }
+  return S.single && S.single.width
+    ? { W: S.single.width, H: S.single.height, path: S.single.path } : null;
 }
 
-function updateCropPreview() {
-  const on = $("#f-crop").checked;
-  $("#crop-body").classList.toggle("hidden", !on);
-  const adv = $("#crop-adv");
-  if (on && adv) adv.open = true;
-  if (!on) { updateBar(); return; }
+function readCropFor(ui) {
+  const num = sel => Math.max(0, parseInt($(sel).value, 10) || 0);
+  return {
+    enabled: $(ui.toggle).checked,
+    left: num(ui.left), top: num(ui.top),
+    right: num(ui.right), bottom: num(ui.bottom),
+    scale_back: $(ui.scale).checked,
+  };
+}
+function readCrop() { return readCropFor(CROP_MERGE); }
 
-  const files = (S.scan && S.scan.files) || [];
-  const f = files.find(x => x.ok) || files[0];
-  const c = readCrop();
-  if (!f) { $("#crop-size").textContent = "等待扫描"; return; }
+function updateCropPreviewFor(ui) {
+  const on = $(ui.toggle).checked;
+  $(ui.body).classList.toggle("hidden", !on);
+  if (on && ui.root && $(ui.root)) $(ui.root).open = true;
+  if (!on) { afterCropChange(ui); return; }
 
-  const img = $("#crop-img");
-  if (img) {
-    const url = "/api/thumb?path=" + encodeURIComponent(f.path) + "&t=2";
+  const dims = cropDims(ui);
+  if (!dims) { $(ui.size).textContent = "等待素材"; afterCropChange(ui); return; }
+
+  const c = readCropFor(ui);
+  const W = Number(dims.W) || 1280, H = Number(dims.H) || 720;
+  const l = Math.min(c.left, W - 64), r = Math.min(c.right, W - 64);
+  const tp = Math.min(c.top, H - 64), bt = Math.min(c.bottom, H - 64);
+  const lp = l / W * 100, rp = r / W * 100, tpp = tp / H * 100, bp = bt / H * 100;
+
+  const set = (sel, prop, val) => { const el = $(sel); if (el) el.style[prop] = val; };
+  set(ui.strips.top, "height", tpp + "%");
+  set(ui.strips.bottom, "height", bp + "%");
+  set(ui.strips.left, "width", lp + "%");
+  set(ui.strips.right, "width", rp + "%");
+  set(ui.strips.left, "top", tpp + "%");
+  set(ui.strips.left, "bottom", bp + "%");
+  set(ui.strips.right, "top", tpp + "%");
+  set(ui.strips.right, "bottom", bp + "%");
+
+  const canvas = document.querySelector(ui.body + " .crop-canvas");
+  if (canvas) canvas.style.aspectRatio = W + " / " + H;
+
+  const keep = $(ui.keep);
+  if (keep) {
+    keep.style.left = lp + "%"; keep.style.right = rp + "%";
+    keep.style.top = tpp + "%"; keep.style.bottom = bp + "%";
+  }
+
+  const img = $(ui.img);
+  if (img && dims.path) {
+    const url = "/api/thumb?path=" + encodeURIComponent(dims.path) + "&t=2";
     if (img.dataset.src !== url) {
       img.dataset.src = url;
       img.style.display = "none";
@@ -1171,64 +1281,182 @@ function updateCropPreview() {
     }
   }
 
-  const W = Number(f.width) || 1280, H = Number(f.height) || 720;
-  const l = Math.min(c.left, W - 64), r = Math.min(c.right, W - 64);
-  const tp = Math.min(c.top, H - 64), bt = Math.min(c.bottom, H - 64);
-  const lp = l / W * 100, rp = r / W * 100, tpp = tp / H * 100, bp = bt / H * 100;
-
-  const set = (sel, prop, val) => { const el = $(sel); if (el) el.style[prop] = val; };
-  set("#strip-top", "height", tpp + "%");
-  set("#strip-bottom", "height", bp + "%");
-  set("#strip-left", "width", lp + "%");
-  set("#strip-right", "width", rp + "%");
-  set("#strip-left", "top", tpp + "%");
-  set("#strip-left", "bottom", bp + "%");
-  set("#strip-right", "top", tpp + "%");
-  set("#strip-right", "bottom", bp + "%");
-
-  const keep = $("#crop-keep");
-  keep.style.left = lp + "%"; keep.style.right = rp + "%";
-  keep.style.top = tpp + "%"; keep.style.bottom = bp + "%";
-  $("#crop-size").textContent = (W - l - r) + "×" + (H - tp - bt) + "  ←  " + W + "×" + H;
-  updateBar();
+  $(ui.size).textContent = (W - l - r) + "×" + (H - tp - bt) + "  ←  " + W + "×" + H;
+  afterCropChange(ui);
 }
 
-function applyCropPreset(name) {
-  const files = (S.scan && S.scan.files) || [];
-  const f = files.find(x => x.ok);
-  const H = f ? (Number(f.height) || 720) : 720;
+function afterCropChange(ui) {
+  if (ui === CROP_MERGE) updateBar();
+  else updateSingleSummary();
+}
+
+function updateCropPreview() { updateCropPreviewFor(CROP_MERGE); }
+
+function applyCropPresetFor(ui, name) {
+  const dims = cropDims(ui);
+  const H = dims ? (Number(dims.H) || 720) : 720;
   const set = (t, b, l, r) => {
-    $("#crop-top").value = t; $("#crop-bottom").value = b;
-    $("#crop-left").value = l; $("#crop-right").value = r;
+    $(ui.top).value = t; $(ui.bottom).value = b;
+    $(ui.left).value = l; $(ui.right).value = r;
   };
   if (name === "top60") set(Math.min(60, H - 64), 0, 0, 0);
   else if (name === "top80") set(Math.min(80, H - 64), 0, 0, 0);
   else if (name === "tb40") set(40, 40, 0, 0);
   else set(0, 0, 0, 0);
-  updateCropPreview();
+  updateCropPreviewFor(ui);
 }
+function applyCropPreset(name) { applyCropPresetFor(CROP_MERGE, name); }
 
-async function detectCrop() {
-  const folder = $("#f-folder").value.trim();
-  if (!folder) return toast("请先选择源文件夹", "bad");
-  const btn = $("#btn-detect-crop");
+async function detectCropFor(ui, payload) {
+  const btn = ui === CROP_MERGE ? $("#btn-detect-crop") : $("#v-detect-crop");
+  const old = btn.textContent;
   btn.disabled = true; btn.textContent = "检测中…";
   try {
-    const r = await api("/api/detect-crop", { folder });
-    if (!r.ok) { toast("没有检测到黑边，可用预设去台标", "bad"); return; }
-    $("#crop-left").value = r.left; $("#crop-top").value = r.top;
-    $("#crop-right").value = r.right; $("#crop-bottom").value = r.bottom;
-    $("#f-crop").checked = true;
-    updateCropPreview();
-    toast("已套用：左 " + r.left + " / 上 " + r.top + " / 右 " + r.right + " / 下 " + r.bottom + " px", "ok");
+    const r = await api("/api/detect-crop", payload);
+    if (!r.ok) { toast("没有检测到黑边，可用预设去水印/台标", "bad"); return; }
+    $(ui.left).value = r.left; $(ui.top).value = r.top;
+    $(ui.right).value = r.right; $(ui.bottom).value = r.bottom;
+    $(ui.toggle).checked = true;
+    updateCropPreviewFor(ui);
+    toast("已套用：左 " + r.left + " / 上 " + r.top + " / 右 " + r.right +
+          " / 下 " + r.bottom + " px", "ok");
   } catch (e) {
     toast("检测失败：" + e.message, "bad");
   } finally {
-    btn.disabled = false; btn.textContent = "自动检测黑边";
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+async function detectCrop() {
+  const folder = $("#f-folder").value.trim();
+  if (!folder) return toast("请先选择源文件夹", "bad");
+  return detectCropFor(CROP_MERGE, { folder });
+}
+
+/* ================================================================
+ * v6.2：单个视频（裁剪 / 剪头尾）
+ * ================================================================ */
+function renderSingle() {
+  updateCropPreviewFor(CROP_VIDEO);
+  updateSingleSummary();
+}
+
+function updateSingleSummary() {
+  const s = S.single || {};
+  const pill = $("#v-out-size");
+  const btn = $("#v-start");
+  if (!s.width) {
+    pill.textContent = "—";
+    if (btn) btn.disabled = true;
+    return;
+  }
+  const c = readCropFor(CROP_VIDEO);
+  const W = Number(s.width) || 0, H = Number(s.height) || 0;
+  const cw = Math.max(16, W - c.left - c.right);
+  const ch = Math.max(16, H - c.top - c.bottom);
+  const head = parseFloat($("#v-trim-head").value) || 0;
+  const tail = parseFloat($("#v-trim-tail").value) || 0;
+  const dur = Math.max(0, (Number(s.duration) || 0) - head - tail);
+  pill.textContent = (c.enabled ? cw + "×" + ch : W + "×" + H) + " · " + fmtDur(dur);
+  if (btn) btn.disabled = false;
+}
+
+async function probeSingle() {
+  const path = $("#v-target").value.trim();
+  if (!path) return toast("请先选择视频文件", "bad");
+  if (!(S.cfg && S.cfg.ready)) return toast("ffmpeg 未就绪，请先到设置页配置", "bad");
+  const btn = $("#v-probe");
+  btn.disabled = true; btn.textContent = "读取中…";
+  try {
+    const r = await api("/api/probe?path=" + encodeURIComponent(path));
+    S.single = { path: r.path, width: r.width, height: r.height,
+                 duration: r.duration, fps: r.fps, acodec: r.acodec };
+    $("#v-meta").innerHTML =
+      "分辨率 <b>" + r.width + "×" + r.height + "</b> · 时长 <b>" + fmtDur(r.duration) +
+      "</b> · 视频 <b>" + String(r.vcodec || "—").toUpperCase() + "</b> · 音频 <b>" +
+      (r.acodec ? String(r.acodec).toUpperCase() : "无") + "</b>" +
+      (r.chapters ? " · 章节 " + r.chapters + " 个" : "");
+    renderSingle();
+    toast("已读取视频信息", "ok");
+  } catch (e) {
+    S.single = { path: "", width: 0, height: 0 };
+    renderSingle();
+    toast("读取失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = "读取信息";
+  }
+}
+
+async function startSingle() {
+  const s = S.single || {};
+  if (!s.path) return toast("请先选择视频文件", "bad");
+  const crop = readCropFor(CROP_VIDEO);
+  const head = Math.max(0, parseFloat($("#v-trim-head").value) || 0);
+  const tail = Math.max(0, parseFloat($("#v-trim-tail").value) || 0);
+  if (!crop.enabled && head <= 0 && tail <= 0) {
+    return toast("请启用画面裁剪，或设置片头片尾", "bad");
+  }
+  const btn = $("#v-start");
+  btn.disabled = true; btn.textContent = "加入中…";
+  try {
+    await api("/api/queue/add", {
+      op: "video", target: s.path,
+      output: $("#v-output").value.trim(),
+      crop: crop, trim_head: head, trim_tail: tail,
+      encoder: $("#v-encoder").value,
+      crf: parseInt($("#v-crf").value, 10) || 20,
+      preset: $("#v-preset").value,
+    });
+    toast("处理任务已加入队列", "ok");
+    await refreshQueue();
+    location.hash = "#/queue";
+  } catch (e) {
+    toast("加入失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = "加入队列";
   }
 }
 
 /* ================================================================
+ * v6.2：编码器可用性
+ * ================================================================ */
+function renderEncoders(list) {
+  S.encoders = list || {};
+  const box = $("#enc-status");
+  if (box) {
+    box.innerHTML = Object.entries(S.encoders).map(([key, v]) =>
+      '<div class="enc-row"><i class="enc-dot ' + (v.ok ? "ok" : "bad") + '"></i>' +
+      "<b>" + esc(v.label) + '</b><span class="mono">' + esc(key) + "</span>" +
+      '<span class="state">' + (v.ok
+        ? '<span class="pill done">可用</span>'
+        : '<span class="pill queued">不可用</span>' +
+          '<span class="enc-reason">' + esc(v.reason || "") + "</span>") +
+      "</span></div>").join("");
+  }
+  ["#f-encoder", "#v-encoder", "#d-encoder"].forEach(applyEncoderAvailability);
+}
+
+function applyEncoderAvailability(sel) {
+  const el = $(sel);
+  if (!el || !S.encoders) return;
+  Array.from(el.options).forEach(op => {
+    const st = S.encoders[op.value];
+    const base = op.textContent.replace("（不可用）", "");
+    if (st && !st.ok) {
+      op.disabled = true;
+      op.textContent = base + "（不可用）";
+    } else {
+      op.disabled = false;
+      op.textContent = base;
+    }
+  });
+  const cur = el.options[el.selectedIndex];
+  if (cur && cur.disabled) {
+    el.value = "libx264";
+    toast("所选编码器在本机不可用，已切换为 libx264", "bad");
+  }
+}
+
+/* ---------------- 启动 ---------------- *//* ================================================================
  * v6：提取音频
  * ================================================================ */
 function renderAudio() {
@@ -1427,11 +1655,16 @@ async function enqueueSplit() {
   }
   // ?crop=60 → 直接带上「去顶部 60px」的裁剪参数
   const preVideo = qp.get("video");
-  if (preVideo) $("#p-target").value = preVideo;
+  if (preVideo) {
+    $("#p-target").value = preVideo;
+    $("#v-target").value = preVideo;
+  }
   const cropPre = qp.get("crop");
   if (cropPre) {
     $("#f-crop").checked = true;
     $("#crop-top").value = parseInt(cropPre, 10) || 0;
+    $("#v-crop").checked = true;
+    $("#v-top").value = parseInt(cropPre, 10) || 0;
   }
 
   // 打开时若有任务在跑，直接落在队列页
@@ -1446,7 +1679,9 @@ async function enqueueSplit() {
   renderAudio();
   $("#p-minutes").disabled = $("#p-mode").value !== "time";
   renderSplit();
+  renderSingle();
   if (preVideo && qp.get("plan") === "1") setTimeout(makeSplitPlan, 120);
+  if (preVideo && location.hash === "#/single") setTimeout(probeSingle, 120);
   if (pre && qp.get("scan") === "1") {
     setTimeout(() => (location.hash === "#/audio" ? scanAudio() : doScan()), 80);
   }

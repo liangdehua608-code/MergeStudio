@@ -487,3 +487,15 @@ td .dur-to{color:var(--muted);font-size:11px;margin-left:5px}
 .op-tag.audio{background:#eef7f4;color:#0b7d57;border-color:#cfe9de}
 
 .input:disabled,select:disabled{opacity:.55;cursor:not-allowed;background:#f4f5f8}
+
+/* ================= v6.2：编码器状态 ================= */
+.enc-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.enc-row{display:flex;align-items:center;gap:8px;font-size:12px;
+  padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}
+.enc-row .mono{color:var(--muted);font-size:10.5px}
+.enc-row b{font-weight:600;font-size:12px}
+.enc-row .state{margin-left:auto;display:flex;gap:8px;align-items:center}
+.enc-reason{color:var(--muted);font-size:11px;max-width:260px;text-align:right}
+.enc-dot{width:8px;height:8px;border-radius:50%;background:#c7ccd6;flex:none}
+.enc-dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(14,159,110,.12)}
+.enc-dot.bad{background:var(--bad);box-shadow:0 0 0 3px rgba(220,63,63,.1)}

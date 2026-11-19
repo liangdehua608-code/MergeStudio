@@ -10,6 +10,9 @@ def run_task(params: dict):
     if op == "audio":
         from .audio import audio_run
         return audio_run(params)
+    if op == "video":
+        from .video import video_run
+        return video_run(params)
     if op == "split":
         from .split import split_run
         return split_run(params)
