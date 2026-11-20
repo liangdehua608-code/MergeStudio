@@ -12,6 +12,10 @@ venv/
 _smoke/
 *.log
 
+# 打包产物（打包.bat 生成的发布包与临时目录）
+_dist/
+MergeStudio-v*.zip
+
 # 编辑器与系统
 .idea/
 .vscode/
