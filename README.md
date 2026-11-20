@@ -73,17 +73,17 @@
 
 ## 截图
 
-| 单个视频 · 去水印 / 裁剪 | 合并任务 · 预检 + 批量裁剪 |
+| 视频裁剪 · 单个 / 批量 | 新建任务 · 预检 + 裁剪预览 |
 | --- | --- |
-| ![单视频](docs/screenshots/single.png) | ![裁剪](docs/screenshots/crop.png) |
+| ![视频裁剪](docs/screenshots/single.png) | ![裁剪](docs/screenshots/crop.png) |
 
 | 提取音频 | 音视频合并 |
 | --- | --- |
 | ![音频](docs/screenshots/audio.png) | ![合并](docs/screenshots/mux.png) |
 
-按章节切割，逐段勾选要导出的内容：
-
-![切割](docs/screenshots/split.png)
+| 视频切割 · 按章节勾选 | 设置 · 同名输出 / 通知 / 托盘 |
+| --- | --- |
+| ![切割](docs/screenshots/split.png) | ![设置](docs/screenshots/settings.png) |
 
 ## 环境要求
 
