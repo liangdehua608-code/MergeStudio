@@ -14,8 +14,11 @@ def run_ffmpeg(cmd, total_sec=0.0, on_progress=None, should_cancel=None):
 
     返回 (退出码, 最后 60 行 stderr, 是否被取消)。
     取消走 terminate 而不是 kill，让 ffmpeg 自己收尾、释放输出文件句柄。
+    标准输入接 DEVNULL：等价于旧命令里的 `-nostdin`，但不依赖那个 3.3 才有的参数
+    （老版本 ffmpeg 见到它会报 `Failed to set value '-f' for option 'nostdin'`）。
     """
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace",
                             bufsize=1)
     err_buf = []
@@ -93,15 +96,17 @@ def extract_frame(path, t: float = 2.0, width: int = 720) -> bytes:
         t = max(0.0, float(t))
     except Exception:
         t = 0.0
-    cmd = [C.FFMPEG, "-hide_banner", "-nostdin", "-v", "error",
+    cmd = [C.FFMPEG, "-hide_banner", "-v", "error",
            "-ss", f"{t:.2f}", "-i", str(path),
            "-frames:v", "1",
            "-vf", f"scale={max(160, int(width))}:-2",
            "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
-    r = subprocess.run(cmd, capture_output=True, timeout=60)
+    r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
+                       timeout=60)
     if r.returncode != 0 or not r.stdout:
         cmd[cmd.index("-ss") + 1] = "0"
-        r = subprocess.run(cmd, capture_output=True, timeout=60)
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=60)
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError("抽帧失败")
     return r.stdout

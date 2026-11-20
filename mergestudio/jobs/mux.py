@@ -84,7 +84,7 @@ def mux_run(params: dict):
                 + (f"，新音频音量 {volume}%" if mode == "mix" else ""))
         JOB.log(f"   对齐：{'以较短者为准' if fit == 'shortest' else '以视频时长为准'}")
 
-        cmd = [C.FFMPEG, "-hide_banner", "-nostdin", "-y",
+        cmd = [C.FFMPEG, "-hide_banner", "-y",
                "-progress", "pipe:1", "-nostats",
                "-i", str(video), "-i", str(audio)]
 

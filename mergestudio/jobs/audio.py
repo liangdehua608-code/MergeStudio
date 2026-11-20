@@ -84,7 +84,7 @@ def audio_run(params: dict):
                        message=f"提取音频 {done + 1}/{total}")
             JOB.log(f"  [{done + 1}/{total}] {src.name[:46]}")
 
-            cmd = [C.FFMPEG, "-hide_banner", "-nostdin", "-y",
+            cmd = [C.FFMPEG, "-hide_banner", "-y",
                    "-i", str(src), "-vn"]
             if fmt == "mp3":
                 cmd += ["-c:a", "libmp3lame", "-q:a", str(max(0, min(9, quality)))]

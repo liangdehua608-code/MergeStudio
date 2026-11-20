@@ -99,7 +99,7 @@ def split_run(params: dict):
                        message=f"切割 {idx + 1}/{total}",
                        done_files=done)
 
-            cmd = [C.FFMPEG, "-hide_banner", "-nostdin", "-y",
+            cmd = [C.FFMPEG, "-hide_banner", "-y",
                    "-progress", "pipe:1", "-nostats",
                    "-ss", f"{start:.3f}", "-i", str(src),
                    "-t", f"{dur:.3f}",

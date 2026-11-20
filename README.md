@@ -84,7 +84,7 @@
 ## 环境要求
 
 - Python 3.9+
-- ffmpeg / ffprobe（需自行安装，建议 5.0+；需要 libx264，字幕烧录另需 libass）
+- ffmpeg / ffprobe（需自行安装，**要求 5.0+**；需要 libx264，字幕烧录另需 libass）
   - Windows 可用 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 的 full build
   - 也可以在网页「设置」里填 ffmpeg.exe / bin 目录，留空则自动从 PATH 查找
 - 硬件编码器可选：程序启动后会自动探测本机可用性，不可用的会直接禁用并说明原因
@@ -216,6 +216,20 @@ python -m unittest tests.test_smoke -v
 **失败后输出目录多了 `.merge_work_xxx` 文件夹？**
 那是断点续跑保留的已完成分段，不是垃圾文件。点任务详情里的「断点续跑」会复用它、
 成功后再删除；不想续跑就在队列里移除该任务，中间文件会一起清理。
+
+**四个编码器全都不可用，还说 `Failed to set value '-f' for option 'nostdin'`？**
+跟显卡无关，是 ffmpeg 太旧。`-nostdin` 是 ffmpeg 3.3 才有的参数，更老的版本会把它
+当成未知的私有参数、顺手吃掉后面的 `-f`，于是每次探测都失败——注意连 CPU 编码
+（libx264）也一起挂，这本身就说明问题不在显卡。换 gyan.dev 的 full build（5.0+）即可。
+v6.4.1 起已经不再用这个参数，报错也会直接说明「ffmpeg 版本过旧」。
+
+**只有 Intel 核显，QSV 还是不可用？**
+核显也需要装 Intel 显卡驱动（不是主板芯片组驱动），装完重启再点「重新检测」。
+太老的 CPU（四代以前）不支持 QuickSync，直接用 CPU 编码即可。
+
+**「验证并保存」说这是 ffprobe，不是 ffmpeg？**
+两个路径框填成同一个文件了。ffmpeg 负责转码、ffprobe 负责读信息，必须分别指定；
+如果 ffprobe 留空，程序会自动从 ffmpeg 同目录推导。
 
 **字幕能提取吗？**
 分两种：视频里已经烧进画面的字幕没法提取（B 站课程大多如此）；如果是**软字幕轨**

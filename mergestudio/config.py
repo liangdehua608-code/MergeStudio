@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 APP_NAME = "视频拼接工坊"
-APP_VERSION = "6.4.0"
+APP_VERSION = "6.4.1"
 APP_ID = "merge-studio"
 DEFAULT_PORT = 8760
 
@@ -37,6 +37,7 @@ FFMPEG = ""
 FFPROBE = ""
 ON_EXISTS = "rename"       # rename（默认，发现同名就改名）/ overwrite
 TK_LOCK = threading.Lock()
+_BANNERS: dict[str, str] = {}   # path -> `-version` 首行，供错误提示复用
 
 # 默认配置：新增字段直接加在这里，load_config 会自动补齐
 DEFAULT_CONFIG = {
@@ -124,24 +125,45 @@ def derive_ffprobe(ffmpeg_path: str) -> str:
     cand = p.parent / name
     return str(cand) if cand.is_file() else ""
 
-def verify_bin(path: str):
+def verify_bin(path: str, expect: str = ""):
+    """跑一次 `-version` 验证可执行文件。
+
+    `expect` 校验「这到底是不是你要的那个程序」：把 ffprobe.exe 填进 ffmpeg 栏位时，
+    两个框都能「验证通过」（都有 -version），之后所有任务却会以莫名其妙的参数错误失败。
+    这里提前拦下并说清楚。
+    """
     if not path:
         return False, "未设置或无法解析"
     if not Path(path).is_file() and not shutil.which(path):
         return False, f"文件不存在：{path}"
     try:
-        r = subprocess.run([path, "-version"], capture_output=True,
-                           text=True, timeout=10, encoding="utf-8",
-                           errors="replace")
+        r = subprocess.run([path, "-version"], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=10,
+                           encoding="utf-8", errors="replace")
         if r.returncode != 0:
             tail = (r.stderr or r.stdout or f"返回码 {r.returncode}")
             return False, tail.splitlines()[0][:200] if tail else "执行失败"
-        first = (r.stdout or "").splitlines()
-        return True, (first[0] if first else "OK")
+        lines = (r.stdout or "").splitlines()
+        banner = lines[0].strip() if lines else ""
+        _BANNERS[path] = banner
+        name = banner.split()[0].lower() if banner else ""
+        if expect and not name.startswith(expect):
+            return False, f"这是 {name or '未知程序'}，不是 {expect}"
+        return True, banner or "OK"
     except FileNotFoundError:
         return False, "文件不存在或无法执行"
     except Exception as e:
         return False, str(e)
+
+
+def bin_banner(path: str) -> str:
+    """可执行文件的版本首行（带缓存），只用于错误提示。"""
+    if not path:
+        return ""
+    if path in _BANNERS:
+        return _BANNERS[path]
+    verify_bin(path)
+    return _BANNERS.get(path, "")
 
 def apply_config(cfg: dict):
     """把配置写进模块级全局（FFMPEG/FFPROBE/ON_EXISTS），返回 (ffmpeg, ffprobe)。"""
@@ -154,11 +176,12 @@ def apply_config(cfg: dict):
     return FFMPEG, FFPROBE
 
 def config_status() -> dict:
-    ff_ok, ff_msg = verify_bin(FFMPEG)
-    fp_ok, fp_msg = verify_bin(FFPROBE)
+    ff_ok, ff_msg = verify_bin(FFMPEG, "ffmpeg")
+    fp_ok, fp_msg = verify_bin(FFPROBE, "ffprobe")
     return {"ffmpeg": FFMPEG, "ffprobe": FFPROBE,
             "ffmpeg_ok": ff_ok, "ffprobe_ok": fp_ok,
             "ffmpeg_version": ff_msg, "ffprobe_version": fp_msg,
+            "ffmpeg_banner": _BANNERS.get(FFMPEG, ""),
             "ready": ff_ok and fp_ok,
             "on_exists": ON_EXISTS,
             "config_file": str(CONFIG_FILE)}

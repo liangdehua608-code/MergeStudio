@@ -414,6 +414,52 @@ class OutputGuardTest(unittest.TestCase):
             self.assertEqual(names, ["x_merged.mp4", "x_merged_2.mp4"])
 
 
+class EncoderDiagnosisTest(unittest.TestCase):
+    """编码器报错的翻译：老版本 ffmpeg 的 `-nostdin` 报错必须指向 ffmpeg 本身。"""
+
+    def test_old_ffmpeg_option_error_points_to_ffmpeg(self):
+        msg = encoders._reason(
+            "libx264", "Failed to set value '-f' for option 'nostdin': Option not found")
+        self.assertIn("ffmpeg", msg)
+        self.assertIn("5.0", msg, "应该告诉用户需要 5.0+")
+
+    def test_probe_cmd_avoids_nostdin(self):
+        captured = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, *a, **kw):
+            captured["cmd"] = cmd
+            captured["kw"] = kw
+            return FakeResult()
+
+        old_run = encoders.subprocess.run
+        encoders.subprocess.run = fake_run
+        try:
+            st = encoders.probe("libx264")
+        finally:
+            encoders.subprocess.run = old_run
+        self.assertTrue(st["ok"])
+        self.assertNotIn("-nostdin", captured["cmd"],
+                         "老版本 ffmpeg 不认 -nostdin，会把后面的参数吃掉")
+        self.assertEqual(captured["kw"].get("stdin"), subprocess.DEVNULL)
+
+    def test_unavailable_msg_does_not_misguide(self):
+        old_status = encoders.status
+        encoders.status = lambda force=False: {
+            e: {"ok": False, "reason": "这台机器上的 ffmpeg 是「ffmpeg version 2.8」"} 
+            for e in encoders.PROFILES}
+        try:
+            msg = encoders.unavailable_msg("libx264")
+        finally:
+            encoders.status = old_status
+        self.assertIn("ffmpeg", msg)
+        self.assertNotIn("改用 libx264", msg, "ffmpeg 本身坏了，别再让用户换编码器")
+
+
 class SubtitlePlanTest(unittest.TestCase):
     """字幕保留策略：三种情况都必须是「宁可丢字幕，不拼坏文件」。"""
 

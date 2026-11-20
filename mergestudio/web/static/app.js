@@ -1557,7 +1557,32 @@ function renderEncoders(list) {
           '<span class="enc-reason">' + esc(v.reason || "") + "</span>") +
       "</span></div>").join("");
   }
+  renderEncHint();
   ["#f-encoder", "#v-encoder", "#d-encoder"].forEach(applyEncoderAvailability);
+}
+
+/* 四个全挂基本不是显卡问题，而是 ffmpeg 不对——单独提醒一句 */
+function renderEncHint() {
+  const hint = $("#enc-hint");
+  if (!hint) return;
+  const all = Object.values(S.encoders || {});
+  const bad = all.filter(v => !v.ok);
+  if (!all.length || !bad.length) {
+    hint.className = "hidden";
+    hint.innerHTML = "";
+    return;
+  }
+  if (bad.length === all.length) {
+    hint.className = "banner bad";
+    hint.style.marginTop = "10px";
+    hint.innerHTML = "<b>四个编码器全部不可用</b>，这通常不是显卡驱动问题，" +
+      "而是 ffmpeg 路径指向了别的程序、或版本太旧（需要 5.0+ 的 full build）。<br>" +
+      "当前原因：" + esc(bad[0].reason || "未知");
+  } else {
+    hint.className = "banner warn";
+    hint.style.marginTop = "10px";
+    hint.innerHTML = "有 " + bad.length + " 个编码器不可用，其余可以正常使用（原因见下表）。";
+  }
 }
 
 function applyEncoderAvailability(sel) {

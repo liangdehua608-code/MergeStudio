@@ -195,7 +195,7 @@ def do_copy(files, out: Path, total_sec: float,
             eff = trim_span(src_dur, head, tail) if src_dur else 0.0
 
             cmd = [
-                C.FFMPEG, "-hide_banner", "-nostdin", "-y",
+                C.FFMPEG, "-hide_banner", "-y",
                 "-fflags", "+genpts+igndts+discardcorrupt",
             ]
             # 片头裁剪：先把 -ss 对齐到真实关键帧，再配 -copyts 用绝对 -t 收尾。
@@ -288,7 +288,7 @@ def do_copy(files, out: Path, total_sec: float,
                     f"（理论 {total_sec:.2f}s，裁剪关键帧对齐差 "
                     f"{actual_total - total_sec:+.2f}s）")
 
-        cmd = [C.FFMPEG, "-hide_banner", "-nostdin", "-y",
+        cmd = [C.FFMPEG, "-hide_banner", "-y",
                "-fflags", "+genpts",
                "-progress", "pipe:1", "-nostats",
                "-f", "concat", "-safe", "0", "-i", str(tmp)]
@@ -357,7 +357,7 @@ def encode_one(src: Path, dst: Path, w: int, h: int, fps: str,
             vf = (f"crop=trunc((iw-{cl + cr})/2)*2:"
                   f"trunc((ih-{ct + cb})/2)*2:{cl}:{ct}," + vf)
 
-    cmd = [C.FFMPEG, "-hide_banner", "-nostdin", "-y",
+    cmd = [C.FFMPEG, "-hide_banner", "-y",
            "-progress", "pipe:1", "-nostats"]
     if head and float(head) > 0.05:
         cmd += ["-ss", f"{float(head):.3f}"]
@@ -693,11 +693,8 @@ def job_run(params: dict):
 
         # 编码器不可用就直接报人话，不要跑到一半才失败
         if mode != "copy":
-            _st = encoders.ensure(encoder)
-            if not _st.get("ok"):
-                raise RuntimeError(
-                    f"编码器 {encoder} 不可用：{_st.get('reason') or '未知原因'}。"
-                    f"请在「设置」页改用 libx264（CPU）后重试。")
+            if not encoders.ensure(encoder).get("ok"):
+                raise RuntimeError(encoders.unavailable_msg(encoder))
             _lim = encoders.max_parallel(encoder)
             if _lim and parallel > _lim:
                 JOB.log(f"ℹ️ {encoder} 建议最多 {_lim} 路并发，"

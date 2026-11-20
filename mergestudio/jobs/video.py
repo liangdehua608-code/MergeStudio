@@ -67,10 +67,8 @@ def video_run(params: dict):
         crf = int(params.get("crf", 20) or 20)
         preset = str(params.get("preset") or "veryfast")
 
-        st = encoders.ensure(encoder)
-        if not st.get("ok"):
-            raise RuntimeError(f"编码器 {encoder} 不可用：{st.get('reason')}。"
-                               f"请改用 libx264（CPU）。")
+        if not encoders.ensure(encoder).get("ok"):
+            raise RuntimeError(encoders.unavailable_msg(encoder))
 
         out = _resolve_output(src, str(params.get("output") or ""), crop_on)
         try:
