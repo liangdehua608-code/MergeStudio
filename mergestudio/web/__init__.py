@@ -358,7 +358,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not Path(target).expanduser().is_file():
                         self._json({"error": f"文件不存在：{target}"}, 400)
                         return
-                elif op in ("split", "video"):
+                elif op == "split":
                     target = str(params.get("target") or "").strip()
                     if not target:
                         self._json({"error": "请选择要处理的视频文件"}, 400)
@@ -366,8 +366,27 @@ class Handler(BaseHTTPRequestHandler):
                     if not Path(target).expanduser().is_file():
                         self._json({"error": f"文件不存在：{target}"}, 400)
                         return
-                    if op == "split" and not params.get("segments"):
+                    if not params.get("segments"):
                         self._json({"error": "请先勾选要导出的片段"}, 400)
+                        return
+                elif op == "video":
+                    # 裁剪支持单个文件，也支持「整个文件夹批量裁剪、不合并」
+                    target = str(params.get("target") or "").strip()
+                    folder = str(params.get("folder") or "").strip()
+                    if not target and not folder:
+                        self._json({"error": "请选择视频文件或文件夹"}, 400)
+                        return
+                    if target and not Path(target).expanduser().is_file():
+                        self._json({"error": f"文件不存在：{target}"}, 400)
+                        return
+                    if folder and not Path(folder).expanduser().is_dir():
+                        self._json({"error": f"文件夹不存在：{folder}"}, 400)
+                        return
+                    cfg = params.get("crop") or {}
+                    if not cfg.get("enabled") and not (
+                            params.get("trim_head") or params.get("trim_tail")):
+                        self._json({"error": "请启用画面裁剪，或设置片头/片尾"},
+                                   400)
                         return
                 else:
                     folder = str(params.get("folder", "")).strip()

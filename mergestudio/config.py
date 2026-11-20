@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 APP_NAME = "视频拼接工坊"
-APP_VERSION = "6.4.1"
+APP_VERSION = "6.5.0"
 APP_ID = "merge-studio"
 DEFAULT_PORT = 8760
 

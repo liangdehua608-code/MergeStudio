@@ -306,6 +306,59 @@ class VideoJobTest(unittest.TestCase):
         self.assertEqual(info.get("height"), 300, "应裁掉顶部 60px")
         self.assertTrue(info.get("acodec"), "应保留音轨")
 
+class VideoBatchCropTest(unittest.TestCase):
+    """批量裁剪：每个视频各自输出，不合并；重复跑不把上次成品当素材。"""
+
+    @classmethod
+    def setUpClass(cls):
+        C.apply_config(C.load_config())
+        if not C.config_status().get("ready"):
+            raise unittest.SkipTest("未配置 ffmpeg / ffprobe，跳过")
+        cls.tmp = tempfile.TemporaryDirectory(prefix="mergestudio-batch-")
+        cls.folder = Path(cls.tmp.name) / "clips"
+        cls.folder.mkdir()
+        for i in (1, 2, 3):
+            _make_clip(cls.folder / f"p{i}.mp4")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _run(self, tid):
+        task = Task(tid, "batch", {})
+        _TLS.task = task
+        try:
+            video_run({
+                "op": "video", "folder": str(self.folder),
+                "crop": {"enabled": True, "top": 60},
+                "encoder": "libx264", "crf": 32, "preset": "ultrafast",
+                "parallel": 2, "on_error": "abort",
+            })
+        finally:
+            _TLS.task = None
+        return task
+
+    def test_batch_crops_each_video_without_merging(self):
+        task = self._run("TBATCH1")
+        self.assertEqual(task.state, "done",
+                         f"{task.error}\n" + "\n".join(task.logs[-10:]))
+        self.assertEqual((task.report or {}).get("count"), 3)
+        self.assertEqual((task.report or {}).get("mode"), "batch")
+        outs = sorted(self.folder.glob("*_cropped.mp4"))
+        self.assertEqual(len(outs), 3, "应逐个输出 3 个裁剪文件，不合并")
+        for p in outs:
+            info = probe_full(p)
+            self.assertEqual(info.get("height"), 300, f"{p.name} 裁剪高度不对")
+            self.assertTrue(info.get("acodec"), f"{p.name} 音轨丢失")
+
+    def test_second_run_renames_and_skips_own_outputs(self):
+        task = self._run("TBATCH2")
+        self.assertEqual(task.state, "done", task.error)
+        # 上次生成的 *_cropped.mp4 不该被当成素材，所以仍是 3 个
+        self.assertEqual(task.total_files, 3, "上次成品被当成素材了")
+        self.assertEqual(len(sorted(self.folder.glob("*_cropped_2.mp4"))), 3)
+
+
 class AudioSingleAndMuxTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

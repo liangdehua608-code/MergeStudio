@@ -17,6 +17,7 @@ const S = {
   audio: { scan: null },
   split: { plan: null },
   single: { path: "", width: 0, height: 0, duration: 0 },
+  batchVideo: { scan: null },
   mux: { video: "", audio: "", vdur: 0, adur: 0 },
   encoders: {},
   detailId: "",
@@ -127,7 +128,7 @@ const PAGES = {
   new: { title: "新建任务", sub: "选文件夹 → 预检 → 设参数 → 加入队列" },
   audio: { title: "提取音频", sub: "批量导出音轨 · m4a 直拷 / mp3 转码" },
   split: { title: "视频切割", sub: "按章节或固定时长切开 · 勾选要导出的片段" },
-  single: { title: "单个视频", sub: "只处理一个视频 · 去水印 / 去黑边 / 剪片头片尾" },
+  single: { title: "视频裁剪", sub: "单个文件 / 文件夹批量 · 裁剪后各自输出，不合并" },
   mux: { title: "音视频合并", sub: "把音频配到视频上 · 替换原音轨或混合" },
   settings: { title: "设置", sub: "ffmpeg 引擎与默认参数" },
 };
@@ -315,9 +316,9 @@ function renderActive() {
        opts.precise ? "精确切割（重编码）" : "流复制",
        "可随时取消"]
     : opts.op === "video"
-    ? ["单个视频",
+    ? [(t.total_files || 0) > 1 ? "批量裁剪 " + t.total_files + " 个" : "单个视频",
        (opts.crop && opts.crop.enabled) ? "画面裁剪" : "无裁剪",
-       "输出为新文件"]
+       "各自输出，不合并"]
     : opts.op === "mux"
     ? ["视频 + 音轨", opts.mode === "mix" ? "与原声混合" : "替换原音轨",
        opts.fit === "video" ? "按视频时长" : "按较短者"]
@@ -422,7 +423,9 @@ function renderTaskList() {
       '<div style="min-width:0">' +
         '<div class="task-name"><span class="nm" title="' + esc(t.name) + '">' + esc(t.name) + "</span>" +
           '<span class="op-tag ' + (opts.op === "audio" ? "audio" : "") + '">' +
-            ({ merge: "合并", audio: "音频", split: "切割", video: "单视频", mux: "音视频" }[opts.op] || "合并") + "</span>" +
+            ({ merge: "合并", audio: "音频", split: "切割",
+               video: (t.total_files || 0) > 1 ? "批量裁剪" : "裁剪",
+               mux: "音视频" }[opts.op] || "合并") + "</span>" +
           '<span class="pill ' + st.cls + '">' + st.text + "</span>" +
           (t.state === "running" || t.state === "scanning" || t.state === "copying" || t.state === "encoding"
             ? '<span class="pill brand num">' + pct + "%</span>" : "") +
@@ -841,6 +844,9 @@ async function loadDetail(id) {
     bits.push(chip("片头 -" + (opts.trim_head || 0) + "s"));
     bits.push(chip("片尾 -" + (opts.trim_tail || 0) + "s"));
     bits.push(chip("编码 " + (opts.encoder || "libx264")));
+    if ((t.total_files || 0) > 1) bits.push(chip("批量 " + t.total_files + " 个视频"));
+    if (opts.on_error) bits.push(chip(opts.on_error === "skip" ? "失败自动跳过" : "失败即中止"));
+    if (opts.parallel) bits.push(chip("并行 " + opts.parallel + " 路"));
   } else {
     bits.push(chip("模式 " + (MODE_TEXT[opts.mode] || opts.mode)));
     bits.push(chip("编码 " + (opts.encoder || "—")));
@@ -889,7 +895,33 @@ async function loadDetail(id) {
     bits.push("</div>");
   }
 
-  if (rep && rep.duration && !rep.segments && !rep.format) {
+  if (rep && rep.mode === "batch") {
+    const skipped = rep.skipped || [];
+    bits.push('<div class="d-sec"><h4>批量裁剪结果</h4>');
+    bits.push('<div class="rep-note ' + (rep.count ? "ok" : "warn") + '">' +
+      "✅ 已裁剪 " + rep.count + " / " + rep.total + " 个视频 · 合计 " +
+      fmtDur(rep.duration || 0) + " · " + fmtSize(rep.size || 0) + "</div>");
+    bits.push('<div class="metrics">');
+    bits.push(metric("成功", String(rep.count), rep.count ? "ok" : "bad"));
+    bits.push(metric("跳过", String(skipped.length), skipped.length ? "warn" : ""));
+    bits.push(metric("总大小", fmtSize(rep.size || 0), ""));
+    bits.push("</div>");
+    const outs = rep.outputs || [];
+    if (outs.length) {
+      bits.push('<div style="margin-top:10px;font-size:11.5px;color:var(--muted);line-height:1.8">' +
+        outs.slice(0, 12).map(o => "· " + esc(o.name) + " —— " + fmtDur(o.duration || 0)).join("<br>") +
+        (outs.length > 12 ? "<br>… 其余 " + (outs.length - 12) + " 个" : "") + "</div>");
+    }
+    const failed = skipped.concat((rep.notes || []).map(n => ({ name: "提示", reason: n })));
+    if (failed.length) {
+      bits.push('<div style="margin-top:8px;color:var(--warn);font-size:11.5px;line-height:1.7">' +
+        failed.slice(0, 12).map(s => "· " + esc(s.name) + " —— " + esc(s.reason)).join("<br>") +
+        "</div>");
+    }
+    bits.push("</div>");
+  }
+
+  if (rep && rep.duration && !rep.segments && !rep.format && rep.mode !== "batch") {
     const deltaOk = Math.abs(rep.delta || 0) <= Math.max(2, (rep.expected_duration || 0) * 0.002);
     const syncOk = rep.sync_delta == null || rep.sync_delta <= 1;
     const frameOk = !rep.expected_frames || !rep.frames || Math.abs(rep.frames - rep.expected_frames) <= 2;
@@ -1051,6 +1083,12 @@ function bindEvents() {
   });
   $("#v-scale-back").addEventListener("change", () => updateCropPreviewFor(CROP_VIDEO));
   $("#v-detect-crop").onclick = () => {
+    if (videoMode() === "batch") {
+      const files = ((S.batchVideo || {}).scan || {}).files || [];
+      const f = files.find(x => x.ok) || files[0];
+      if (!f) return toast("请先扫描文件夹", "bad");
+      return detectCropFor(CROP_VIDEO, { path: f.path });
+    }
     if (!S.single.path) return toast("请先选择视频文件", "bad");
     return detectCropFor(CROP_VIDEO, { path: S.single.path });
   };
@@ -1072,6 +1110,30 @@ function bindEvents() {
   $("#v-start").onclick = startSingle;
   $("#v-trim-head").addEventListener("input", updateSingleSummary);
   $("#v-trim-tail").addEventListener("input", updateSingleSummary);
+  $$('input[name="v-mode"]').forEach(el =>
+    el.addEventListener("change", renderSingle));
+  const vpFolder = $("#v-pick-folder");
+  if (vpFolder) vpFolder.onclick = async () => {
+    const btn = vpFolder;
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const r = await api("/api/pick-folder", { title: "选择要批量裁剪的文件夹" });
+      if (r.path) {
+        $("#v-folder").value = r.path;
+        S.batchVideo.scan = null;
+        $("#v-batch-meta").textContent = "选好后点「扫描」确认文件数量。";
+        renderSingle();
+      }
+    } catch (e) { toast("打开失败：" + e.message, "bad"); }
+    finally { btn.disabled = false; btn.textContent = "浏览"; }
+  };
+  const vsFolder = $("#v-scan-folder");
+  if (vsFolder) vsFolder.onclick = scanBatchVideo;
+  $("#v-recursive").addEventListener("change", () => {
+    S.batchVideo.scan = null;
+    $("#v-batch-meta").textContent = "参数已变，请重新扫描文件夹。";
+    renderSingle();
+  });
   const te = $("#btn-test-enc");
   if (te) te.onclick = async () => {
     te.disabled = true; te.textContent = "检测中…";
@@ -1320,8 +1382,12 @@ function applyDefaults() {
 
 
 /* ================================================================
- * v6：画面裁剪（合并任务 / 单个视频共用）
+ * v6.5：画面裁剪（合并任务 / 单个视频 / 批量裁剪共用）
  * ================================================================ */
+function videoMode() {
+  return (document.querySelector('input[name="v-mode"]:checked') || {}).value || "single";
+}
+
 const CROP_MERGE = {
   name: "merge", root: "#crop-adv", toggle: "#f-crop", body: "#crop-body",
   top: "#crop-top", bottom: "#crop-bottom", left: "#crop-left",
@@ -1342,6 +1408,11 @@ const CROP_VIDEO = {
 function cropDims(ui) {
   if (ui === CROP_MERGE) {
     const files = (S.scan && S.scan.files) || [];
+    const f = files.find(x => x.ok) || files[0];
+    return f ? { W: Number(f.width) || 1280, H: Number(f.height) || 720, path: f.path } : null;
+  }
+  if (videoMode() === "batch") {
+    const files = (S.batchVideo.scan && S.batchVideo.scan.files) || [];
     const f = files.find(x => x.ok) || files[0];
     return f ? { W: Number(f.width) || 1280, H: Number(f.height) || 720, path: f.path } : null;
   }
@@ -1457,17 +1528,30 @@ async function detectCrop() {
 }
 
 /* ================================================================
- * v6.2：单个视频（裁剪 / 剪头尾）
+ * 视频裁剪：单个文件 / 文件夹批量（每个文件单独输出，不合并）
  * ================================================================ */
 function renderSingle() {
+  const batch = videoMode() === "batch";
+  $("#v-single-box").classList.toggle("hidden", batch);
+  $("#v-batch-box").classList.toggle("hidden", !batch);
+  const btn = $("#v-start");
+  if (btn) btn.textContent = batch ? "批量加入队列" : "加入队列";
   updateCropPreviewFor(CROP_VIDEO);
   updateSingleSummary();
 }
 
 function updateSingleSummary() {
-  const s = S.single || {};
   const pill = $("#v-out-size");
   const btn = $("#v-start");
+  if (videoMode() === "batch") {
+    const sc = S.batchVideo && S.batchVideo.scan;
+    const files = sc ? (sc.files || []) : [];
+    const ok = files.filter(f => f.ok).length;
+    pill.textContent = ok ? ok + " 个视频 · " + fmtDur(sc.total_duration || 0) : "等待扫描";
+    if (btn) btn.disabled = !ok || !(S.cfg && S.cfg.ready);
+    return;
+  }
+  const s = S.single || {};
   if (!s.width) {
     pill.textContent = "—";
     if (btn) btn.disabled = true;
@@ -1482,6 +1566,32 @@ function updateSingleSummary() {
   const dur = Math.max(0, (Number(s.duration) || 0) - head - tail);
   pill.textContent = (c.enabled ? cw + "×" + ch : W + "×" + H) + " · " + fmtDur(dur);
   if (btn) btn.disabled = false;
+}
+
+async function scanBatchVideo() {
+  const folder = $("#v-folder").value.trim();
+  if (!folder) return toast("请先选择文件夹", "bad");
+  if (!(S.cfg && S.cfg.ready)) return toast("ffmpeg 未就绪，请先到设置页配置", "bad");
+  const btn = $("#v-scan-folder");
+  btn.disabled = true; btn.textContent = "扫描中…";
+  try {
+    const r = await api("/api/scan", {
+      folder, recursive: $("#v-recursive").checked,
+      out_dir: $("#v-output").value.trim(),
+    });
+    S.batchVideo.scan = r;
+    $("#v-batch-meta").innerHTML = "扫描到 <b>" + r.files.length + "</b> 个视频 · 合计 <b>" +
+      fmtDur(r.total_duration || 0) + "</b>" +
+      (r.all_ok ? "" : " · 有文件无法读取，会自动跳过");
+    renderSingle();
+    toast("扫描完成：" + r.files.length + " 个视频", "ok");
+  } catch (e) {
+    S.batchVideo.scan = null;
+    $("#v-batch-meta").textContent = "扫描失败：" + e.message;
+    renderSingle();
+  } finally {
+    btn.disabled = false; btn.textContent = "扫描";
+  }
 }
 
 async function probeSingle() {
@@ -1511,33 +1621,54 @@ async function probeSingle() {
   }
 }
 
+function videoCommonParams() {
+  return {
+    output: $("#v-output").value.trim(),
+    crop: readCropFor(CROP_VIDEO),
+    trim_head: Math.max(0, parseFloat($("#v-trim-head").value) || 0),
+    trim_tail: Math.max(0, parseFloat($("#v-trim-tail").value) || 0),
+    encoder: $("#v-encoder").value,
+    crf: parseInt($("#v-crf").value, 10) || 20,
+    preset: $("#v-preset").value,
+  };
+}
+
 async function startSingle() {
-  const s = S.single || {};
-  if (!s.path) return toast("请先选择视频文件", "bad");
-  const crop = readCropFor(CROP_VIDEO);
-  const head = Math.max(0, parseFloat($("#v-trim-head").value) || 0);
-  const tail = Math.max(0, parseFloat($("#v-trim-tail").value) || 0);
-  if (!crop.enabled && head <= 0 && tail <= 0) {
+  const common = videoCommonParams();
+  if (!common.crop.enabled && common.trim_head <= 0 && common.trim_tail <= 0) {
     return toast("请启用画面裁剪，或设置片头片尾", "bad");
   }
+  const batch = videoMode() === "batch";
+  const payload = { op: "video" };
+  if (batch) {
+    const folder = $("#v-folder").value.trim();
+    if (!folder) return toast("请先选择文件夹", "bad");
+    if (!(S.batchVideo.scan || {}).files || !S.batchVideo.scan.files.length) {
+      return toast("请先扫描文件夹", "bad");
+    }
+    Object.assign(payload, {
+      folder, recursive: $("#v-recursive").checked,
+      on_error: $("#v-on-error").value,
+      parallel: parseInt($("#v-parallel").value, 10) || 2,
+    });
+  } else {
+    if (!(S.single || {}).path) return toast("请先选择视频文件", "bad");
+    payload.target = S.single.path;
+  }
+  Object.assign(payload, common);
+
   const btn = $("#v-start");
   btn.disabled = true; btn.textContent = "加入中…";
   try {
-    await api("/api/queue/add", {
-      op: "video", target: s.path,
-      output: $("#v-output").value.trim(),
-      crop: crop, trim_head: head, trim_tail: tail,
-      encoder: $("#v-encoder").value,
-      crf: parseInt($("#v-crf").value, 10) || 20,
-      preset: $("#v-preset").value,
-    });
-    toast("处理任务已加入队列", "ok");
+    await api("/api/queue/add", payload);
+    toast(batch ? "批量裁剪任务已加入队列" : "裁剪任务已加入队列", "ok");
     await refreshQueue();
     location.hash = "#/queue";
   } catch (e) {
     toast("加入失败：" + e.message, "bad");
   } finally {
-    btn.disabled = false; btn.textContent = "加入队列";
+    btn.disabled = false;
+    btn.textContent = batch ? "批量加入队列" : "加入队列";
   }
 }
 

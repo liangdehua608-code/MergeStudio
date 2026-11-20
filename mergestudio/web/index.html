@@ -304,24 +304,46 @@
       <section class="view" data-view="single">
         <div class="panel">
           <div class="panel-head">
-            <div><h2 class="panel-title">单个视频</h2>
-              <p class="panel-desc">只处理一个视频：裁掉水印 / 黑边，剪掉片头片尾，输出为新文件，不改源文件</p></div>
+            <div><h2 class="panel-title">视频裁剪</h2>
+              <p class="panel-desc">单个视频或整个文件夹批量处理；每个视频各自输出一个新文件，不会合并</p></div>
           </div>
-          <div class="path-row">
-            <div class="input-icon">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5v5l4-2.5z"/></svg>
-              <input id="v-target" class="input" placeholder="选择一个视频文件，例如带水印的课程片段">
+          <div class="chips" style="margin-top:2px">
+            <label class="choice"><input type="radio" name="v-mode" value="single" checked><span>单个视频</span></label>
+            <label class="choice"><input type="radio" name="v-mode" value="batch"><span>批量文件夹</span></label>
+          </div>
+
+          <div id="v-single-box" style="margin-top:12px">
+            <div class="path-row">
+              <div class="input-icon">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5v5l4-2.5z"/></svg>
+                <input id="v-target" class="input" placeholder="选择一个视频文件，例如带水印的课程片段">
+              </div>
+              <button class="btn" id="v-pick">浏览</button>
+              <button class="btn" id="v-probe">读取信息</button>
             </div>
-            <button class="btn" id="v-pick">浏览</button>
-            <button class="btn" id="v-probe">读取信息</button>
+            <div class="opt-row" id="v-meta" style="color:var(--muted);font-size:12px">选择文件后会自动读取分辨率与时长</div>
           </div>
-          <div class="opt-row" id="v-meta" style="color:var(--muted);font-size:12px">选择文件后会自动读取分辨率与时长</div>
+
+          <div id="v-batch-box" class="hidden" style="margin-top:12px">
+            <div class="path-row">
+              <div class="input-icon">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                <input id="v-folder" class="input" placeholder="选择装了很多视频的文件夹">
+              </div>
+              <button class="btn" id="v-pick-folder">浏览</button>
+              <button class="btn primary" id="v-scan-folder">扫描</button>
+            </div>
+            <div class="opt-row" style="margin-top:10px">
+              <label class="switch"><input type="checkbox" id="v-recursive"><span class="track"></span>包含子文件夹</label>
+            </div>
+            <div class="hint" id="v-batch-meta" style="margin-top:8px">扫描后确认文件数量；裁剪参数会套用到每个视频，但不会把它们拼起来。</div>
+          </div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
             <div><h2 class="panel-title">裁剪与片头片尾</h2>
-              <p class="panel-desc">预览帧上会标出要裁掉的部分；参数都可以手改</p></div>
+              <p class="panel-desc">预览帧上会标出要裁掉的部分；批量模式下同一套参数应用到全部视频</p></div>
             <span class="pill queued" id="v-out-size">—</span>
           </div>
 
@@ -371,14 +393,14 @@
             </label>
             <label class="field">输出目录（可选）
               <div class="input-btn">
-                <input id="v-output" class="input" placeholder="留空 = 源文件同目录">
+                <input id="v-output" class="input" placeholder="留空 = 每个视频同目录">
                 <button class="btn sm" data-pick-dir="#v-output">选择</button>
               </div>
             </label>
           </div>
 
           <details class="adv">
-            <summary>高级：编码器 / 画质</summary>
+            <summary>高级：编码器 / 画质 / 并行 / 失败处理</summary>
             <div class="adv-body">
               <div class="grid3">
                 <label class="field">视频编码器
@@ -401,8 +423,21 @@
                     <option value="slow">slow</option>
                   </select>
                 </label>
+                <label class="field">任一视频裁剪失败时
+                  <select id="v-on-error" class="input">
+                    <option value="abort">中止整批（默认）</option>
+                    <option value="skip">跳过失败视频，其余照做</option>
+                  </select>
+                </label>
+                <label class="field">并行裁剪数
+                  <select id="v-parallel" class="input">
+                    <option value="1">1 路（最省资源）</option>
+                    <option value="2" selected>2 路（均衡）</option>
+                    <option value="4">4 路（高性能）</option>
+                  </select>
+                </label>
               </div>
-              <p class="panel-desc" style="margin-top:10px" id="v-enc-hint"></p>
+              <p class="panel-desc" style="margin-top:10px" id="v-enc-hint">硬件编码器会自动收敛并发，避免驱动 session 超限。</p>
             </div>
           </details>
 
